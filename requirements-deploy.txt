@@ -1,0 +1,7 @@
+# Slim dependency set for cloud deployment of the FastAPI MC app
+# (excludes streamlit/plotly/tqdm used only by the local dashboard & CLI).
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+fastapi>=0.110
+uvicorn[standard]>=0.29

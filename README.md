@@ -79,6 +79,24 @@ uvicorn backend.main:app --port 8600 --app-dir .   # 於 tpex-backtest 目錄執
 - 單筆風險%的語意：該筆交易的權益停損門檻（收盤價檢查）；
   蒙地卡羅的「原始最大回撤」以交易序列計，與日線口徑的差異在頁面上有註明。
 
+## 部署蒙地卡羅網頁到 Render（公開網址，任何人可用）
+
+已備妥 `render.yaml`（Blueprint）與 `requirements-deploy.txt`。步驟：
+
+1. 在 GitHub 建立 repo（private 亦可），推送本資料夾：
+   ```bash
+   git remote add origin https://github.com/<你的帳號>/<repo>.git
+   git push -u origin master
+   ```
+2. 到 <https://render.com> 用 GitHub 登入 → **New + → Blueprint** →
+   選擇該 repo → **Apply**。Render 會自動讀取 `render.yaml` 建立服務。
+3. 部署完成後得到 `https://tpex-mc-backtest.onrender.com` 之類的公開網址。
+
+注意：
+- 免費方案閒置 15 分鐘會休眠，下次開啟需等約 30–60 秒喚醒。
+- 行情資料是隨 repo 提交的快照（`data/tpex.sqlite3`）；要更新，
+  在本機執行 `python cli.py sync-quotes ...` 後重新 commit + push，Render 會自動重新部署。
+
 ## 部署到 Streamlit Community Cloud（讓其他人線上使用）
 
 1. 把本資料夾推上 GitHub（`data/tpex.sqlite3` 一併提交，作為預載資料；
