@@ -57,6 +57,28 @@ pip install -r requirements.txt
    價格走勢與買賣點、權益曲線、回撤、績效指標與交易明細。若資料庫內該區間
    尚無資料，可在儀表板的「資料更新」區塊直接觸發抓取。
 
+## 蒙地卡羅回測分析網頁（React + FastAPI）
+
+五頁式單頁應用：①標的與參數設定（市場類別→產業分類→個股三層連動下拉、
+chip 複選）②回測結果（權益曲線、指標卡、Coef/Std err/t/P>|t|/CI 迴歸統計表、
+逐筆交易明細＋CSV 匯出）③蒙地卡羅設定（reshuffle／bootstrap、次數、進度條）
+④結果視覺化（回撤分布直方圖、Spaghetti 疊圖、百分位數表、風險低估判定）
+⑤多標的比較表。
+
+```bash
+pip install fastapi "uvicorn[standard]"
+uvicorn backend.main:app --port 8600 --app-dir .   # 於 tpex-backtest 目錄執行
+# 開啟 http://localhost:8600/
+```
+
+- 後端模組：`backend/tpex_data.py`（清單／價格，僅上櫃＋興櫃）、
+  `backend/backtest.py`（交易型回測：均線交叉／RSI、單筆風險%＝停損、槓桿、
+  OLS 迴歸）、`backend/monte_carlo.py`（reshuffle／bootstrap 模擬）。
+- 前端：`frontend/index.html`（React 18 + Tailwind + Plotly，CDN 載入，
+  Babel 需鎖 7.x——Babel 8 的 JSX 預設 automatic runtime 會使 inline script 失效）。
+- 單筆風險%的語意：該筆交易的權益停損門檻（收盤價檢查）；
+  蒙地卡羅的「原始最大回撤」以交易序列計，與日線口徑的差異在頁面上有註明。
+
 ## 部署到 Streamlit Community Cloud（讓其他人線上使用）
 
 1. 把本資料夾推上 GitHub（`data/tpex.sqlite3` 一併提交，作為預載資料；

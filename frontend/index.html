@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>櫃買市場蒙地卡羅回測分析</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+<style>
+body{font-family:"Segoe UI","Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+.tabular{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState, useEffect, useRef, useCallback} = React;
+const API = "";  // same origin
+
+const fmtPct = (x, sign) => (x==null || !isFinite(x)) ? "-" : ((sign && x>0 ? "+" : "") + (x*100).toFixed(2) + "%");
+const fmtNum = (x, d=2) => (x==null || !isFinite(x)) ? "-" : Number(x).toLocaleString("zh-TW",{maximumFractionDigits:d});
+const retColor = x => (x==null || !isFinite(x) || x===0) ? "" : (x>0 ? "text-red-600" : "text-emerald-700");
+
+async function apiGet(path){ const r = await fetch(API+path); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function apiPost(path, body){
+  const r = await fetch(API+path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(!r.ok){ let msg; try{ const j=await r.json(); msg=JSON.stringify(j.detail||j);}catch{ msg=r.statusText; } throw new Error(msg); }
+  return r.json();
+}
+
+/* ---------- shared UI ---------- */
+function Card({title, children, className=""}){
+  return <div className={"bg-white rounded-xl border border-slate-200 shadow-sm p-5 "+className}>
+    {title && <h2 className="text-sm font-bold text-slate-700 mb-3">{title}</h2>}
+    {children}
+  </div>;
+}
+function Field({label, children}){
+  return <div className="flex flex-col gap-1">
+    <label className="text-xs text-slate-500">{label}</label>
+    {children}
+  </div>;
+}
+const inputCls = "border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500";
+function Metric({label, value, cls=""}){
+  return <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-4 py-3">
+    <div className="text-xs text-slate-500">{label}</div>
+    <div className={"text-xl font-bold tabular "+cls}>{value}</div>
+  </div>;
+}
+function PlotBox({spec, height=340}){
+  const ref = useRef(null);
+  useEffect(()=>{
+    if(ref.current && spec){
+      Plotly.newPlot(ref.current, spec.data, {...spec.layout,
+        margin:{l:60,r:20,t:30,b:40}, font:{family:'"Segoe UI","Noto Sans TC",sans-serif', size:12},
+        paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)"},
+        {displayModeBar:false, responsive:true});
+    }
+    return ()=>{ if(ref.current) Plotly.purge(ref.current); };
+  },[spec]);
+  return <div ref={ref} style={{height}}/>;
+}
+function RegressionTable({reg}){
+  if(!reg || !reg.rows) return <div className="text-sm text-slate-400">樣本不足，無法計算迴歸。</div>;
+  return <div className="overflow-x-auto">
+    <table className="w-full text-sm tabular">
+      <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+        <th className="text-left py-2 pr-3"></th><th className="text-right px-3">Coef</th>
+        <th className="text-right px-3">Std err</th><th className="text-right px-3">t</th>
+        <th className="text-right px-3">P&gt;|t|</th><th className="text-right px-3">[0.025</th>
+        <th className="text-right px-3">0.975]</th></tr></thead>
+      <tbody>{reg.rows.map(r=>
+        <tr key={r.name} className="border-b border-slate-100">
+          <td className="py-2 pr-3 font-medium">{r.name}</td>
+          <td className="text-right px-3">{r.coef.toFixed(4)}</td>
+          <td className="text-right px-3">{r.std_err.toFixed(4)}</td>
+          <td className="text-right px-3">{r.t.toFixed(3)}</td>
+          <td className="text-right px-3">{r.p.toFixed(3)}</td>
+          <td className="text-right px-3">{r.ci_low.toFixed(4)}</td>
+          <td className="text-right px-3">{r.ci_high.toFixed(4)}</td>
+        </tr>)}</tbody>
+    </table>
+    <div className="text-xs text-slate-400 mt-2">n = {reg.n}、R² = {reg.r2.toFixed(3)}。應變數：策略日報酬；自變數：標的收盤價日報酬。</div>
+  </div>;
+}
+
+/* ---------- page 1: setup ---------- */
+function SetupPage({state, setState, onRun, running}){
+  const {categories, industries, securities, category, industry, secCode, chips,
+         start, end, strategy, params, capital, riskPct, leverage, error} = state;
+  const set = patch => setState(s=>({...s, ...patch}));
+
+  useEffect(()=>{ apiGet("/api/categories").then(d=>set({categories:d.categories, category:d.categories[0]||""})); },[]);
+  useEffect(()=>{
+    if(!category) return;
+    if(category==="股票"){ apiGet("/api/industries?category=股票").then(d=>set({industries:d.industries, industry:""})); }
+    else set({industries:[], industry:""});
+  },[category]);
+  useEffect(()=>{
+    if(!category) return;
+    const q = new URLSearchParams({category}); if(industry) q.set("industry", industry);
+    apiGet("/api/securities?"+q).then(d=>set({securities:d.securities, secCode:d.securities[0]?.code||""}));
+  },[category, industry]);
+
+  const addChip = ()=>{
+    const sec = securities.find(s=>s.code===secCode);
+    if(sec && !chips.some(c=>c.code===sec.code)) set({chips:[...chips, sec]});
+  };
+  return <div className="grid gap-4">
+    <Card title="標的選擇（僅上櫃／興櫃）">
+      <div className="grid md:grid-cols-4 gap-3 items-end">
+        <Field label="1. 市場類別">
+          <select className={inputCls} value={category} onChange={e=>set({category:e.target.value})}>
+            {categories.map(c=><option key={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="2. 產業分類（僅股票）">
+          <select className={inputCls} value={industry} disabled={category!=="股票"}
+                  onChange={e=>set({industry:e.target.value})}>
+            <option value="">全部產業</option>
+            {industries.map(i=><option key={i.code} value={i.code}>{i.name}</option>)}
+          </select>
+        </Field>
+        <Field label={"3. 個股／商品（"+securities.length+" 檔）"}>
+          <select className={inputCls} value={secCode} onChange={e=>set({secCode:e.target.value})}>
+            {securities.map(s=><option key={s.code} value={s.code}>{s.code}　{s.name}（{s.board}）</option>)}
+          </select>
+        </Field>
+        <button onClick={addChip}
+          className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 text-sm font-bold">＋ 加入</button>
+      </div>
+      <div className="flex flex-wrap gap-2 mt-4">
+        {chips.length===0 && <span className="text-sm text-slate-400">尚未加入標的，可複選多檔。</span>}
+        {chips.map(c=>
+          <span key={c.code} className="inline-flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-full pl-3 pr-1 py-1 text-sm">
+            <span className="font-medium">{c.code} {c.name}</span>
+            <span className="text-xs text-slate-500">{c.board}{c.category!=="上櫃"&&c.category!=="興櫃" ? "・"+c.category : ""}</span>
+            <button className="w-6 h-6 rounded-full hover:bg-slate-200 text-slate-500"
+                    onClick={()=>set({chips:chips.filter(x=>x.code!==c.code)})}>✕</button>
+          </span>)}
+      </div>
+    </Card>
+    <Card title="回測參數">
+      <div className="grid md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <Field label="開始日期"><input type="date" className={inputCls} value={start} onChange={e=>set({start:e.target.value})}/></Field>
+        <Field label="結束日期"><input type="date" className={inputCls} value={end} onChange={e=>set({end:e.target.value})}/></Field>
+        <Field label="策略類型">
+          <select className={inputCls} value={strategy} onChange={e=>set({strategy:e.target.value})}>
+            <option value="ma">均線交叉</option><option value="rsi">RSI</option>
+          </select>
+        </Field>
+        {strategy==="ma" ? <React.Fragment>
+          <Field label="短期均線"><input type="number" className={inputCls} value={params.short}
+            onChange={e=>set({params:{...params, short:+e.target.value}})}/></Field>
+          <Field label="長期均線"><input type="number" className={inputCls} value={params.long}
+            onChange={e=>set({params:{...params, long:+e.target.value}})}/></Field>
+        </React.Fragment> : <React.Fragment>
+          <Field label="RSI 週期"><input type="number" className={inputCls} value={params.period}
+            onChange={e=>set({params:{...params, period:+e.target.value}})}/></Field>
+          <Field label="買進/賣出門檻">
+            <div className="flex gap-2">
+              <input type="number" className={inputCls+" w-full"} value={params.lower}
+                onChange={e=>set({params:{...params, lower:+e.target.value}})}/>
+              <input type="number" className={inputCls+" w-full"} value={params.upper}
+                onChange={e=>set({params:{...params, upper:+e.target.value}})}/>
+            </div>
+          </Field>
+        </React.Fragment>}
+      </div>
+      <div className="grid md:grid-cols-3 lg:grid-cols-6 gap-3 mt-3">
+        <Field label="初始本金 (NTD)"><input type="number" className={inputCls} value={capital} step="100000"
+          onChange={e=>set({capital:+e.target.value})}/></Field>
+        <Field label="單筆風險%（停損）"><input type="number" className={inputCls} value={riskPct} step="1" min="0.5"
+          onChange={e=>set({riskPct:+e.target.value})}/></Field>
+        <Field label="槓桿倍數"><input type="number" className={inputCls} value={leverage} step="0.5" min="0.5" max="10"
+          onChange={e=>set({leverage:+e.target.value})}/></Field>
+      </div>
+      <div className="mt-5 flex items-center gap-4">
+        <button onClick={onRun} disabled={running || chips.length===0}
+          className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-lg px-6 py-2.5 text-sm font-bold">
+          {running ? "回測中..." : "執行回測"}
+        </button>
+        {running && <div className="animate-pulse text-sm text-slate-500">正在計算，請稍候…</div>}
+        {error && <div className="text-sm text-red-600">{error}</div>}
+      </div>
+      <div className="text-xs text-slate-400 mt-3">
+        訊號於次一交易日收盤執行；單筆風險%＝該筆交易的權益停損門檻；成本：手續費 0.1425%（買賣各一次）＋賣出證交稅 0.3%，按槓桿名目計。
+      </div>
+    </Card>
+  </div>;
+}
+
+/* ---------- page 2: backtest results ---------- */
+function csvDownload(filename, rows, headers){
+  const lines = [headers.join(",")].concat(rows.map(r=>headers.map(h=>r[h]).join(",")));
+  const blob = new Blob(["﻿"+lines.join("\n")], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+}
+function ResultPage({bt, activeCode, setActiveCode}){
+  const [showTrades, setShowTrades] = useState(false);
+  if(!bt) return <Card><div className="text-slate-400 text-sm">尚未執行回測，請先於「① 設定」頁執行。</div></Card>;
+  const codes = Object.keys(bt.results);
+  const r = bt.results[activeCode] || bt.results[codes[0]];
+  const m = r.metrics;
+  const eqSpec = {
+    data:[{x:r.dates, y:r.equity_curve, type:"scatter", mode:"lines", name:"權益",
+           line:{color:"#2563eb", width:2}}],
+    layout:{title:{text:"權益曲線 (Equity Curve)", font:{size:14}}, yaxis:{tickformat:",.0f"}}
+  };
+  return <div className="grid gap-4">
+    <div className="flex flex-wrap items-center gap-3">
+      <span className="text-sm text-slate-500">標的：</span>
+      {codes.map(c=>
+        <button key={c} onClick={()=>setActiveCode(c)}
+          className={"rounded-full px-4 py-1.5 text-sm font-medium border "+(c===(r.code)?"bg-blue-600 text-white border-blue-600":"bg-white border-slate-300 hover:border-blue-400")}>
+          {c} {bt.results[c].name}
+        </button>)}
+      <span className="text-sm text-slate-400 ml-2">策略：{r.strategy_label}</span>
+      {Object.entries(bt.errors||{}).map(([c,e])=>
+        <span key={c} className="text-xs text-red-500">（{c}：{e}）</span>)}
+    </div>
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+      <Metric label="報酬率" value={fmtPct(m.total_return,true)} cls={retColor(m.total_return)}/>
+      <Metric label="波動率（年化標準差）" value={fmtPct(m.volatility)}/>
+      <Metric label="年化報酬率" value={fmtPct(m.cagr,true)} cls={retColor(m.cagr)}/>
+      <Metric label="勝率" value={fmtPct(m.win_rate)}/>
+      <Metric label="賺賠比" value={fmtNum(m.payoff_ratio)}/>
+      <Metric label="夏普比率" value={fmtNum(m.sharpe)}/>
+      <Metric label="原始最大回撤" value={fmtPct(m.max_drawdown)} cls="text-emerald-700"/>
+      <Metric label="交易次數" value={m.num_trades}/>
+    </div>
+    <Card><PlotBox spec={eqSpec}/></Card>
+    <Card title="迴歸統計表（策略日報酬 ～ 標的收盤價日報酬）"><RegressionTable reg={r.regression}/></Card>
+    <Card>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-bold text-slate-700">逐筆交易明細（蒙地卡羅輸入，共 {r.trades.length} 筆）</h2>
+        <div className="flex gap-2">
+          <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
+            onClick={()=>setShowTrades(!showTrades)}>{showTrades?"收合":"展開"}</button>
+          <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
+            onClick={()=>csvDownload(`trades_${r.code}.csv`,
+              r.trades.map(t=>({...t, return:(t.return*100).toFixed(3)+"%", pnl:t.pnl.toFixed(0)})),
+              ["entry_date","exit_date","entry_price","exit_price","return","pnl","reason"])}>匯出 CSV</button>
+        </div>
+      </div>
+      {showTrades && <div className="overflow-x-auto mt-3">
+        <table className="w-full text-sm tabular">
+          <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+            <th className="text-left py-2">進場日</th><th className="text-left">出場日</th>
+            <th className="text-right">進場價</th><th className="text-right">出場價</th>
+            <th className="text-right">報酬率</th><th className="text-right">損益 (NTD)</th><th className="text-left pl-4">出場原因</th></tr></thead>
+          <tbody>{r.trades.map((t,i)=>
+            <tr key={i} className="border-b border-slate-100">
+              <td className="py-1.5">{t.entry_date}</td><td>{t.exit_date}</td>
+              <td className="text-right">{fmtNum(t.entry_price,4)}</td><td className="text-right">{fmtNum(t.exit_price,4)}</td>
+              <td className={"text-right "+retColor(t.return)}>{fmtPct(t.return,true)}</td>
+              <td className={"text-right "+retColor(t.pnl)}>{fmtNum(t.pnl,0)}</td>
+              <td className="pl-4 text-slate-500">{t.reason}</td>
+            </tr>)}</tbody>
+        </table>
+      </div>}
+    </Card>
+  </div>;
+}
+
+/* ---------- page 3: MC settings ---------- */
+function MCSetupPage({bt, activeCode, mcState, setMcState, onRun}){
+  if(!bt) return <Card><div className="text-slate-400 text-sm">請先完成回測。</div></Card>;
+  const r = bt.results[activeCode];
+  if(!r) return <Card><div className="text-slate-400 text-sm">請先於「② 回測結果」選擇標的。</div></Card>;
+  const {mode, nSims, job} = mcState;
+  const disabled = r.trades.length < 2;
+  return <div className="grid gap-4 max-w-2xl">
+    <Card title={`蒙地卡羅模擬設定 — ${r.code} ${r.name}（${r.trades.length} 筆交易）`}>
+      <div className="grid gap-4">
+        <Field label="模式">
+          <div className="flex gap-3">
+            {[["reshuffle","Reshuffle（打亂順序）","總報酬不變，觀察回撤序列風險"],
+              ["bootstrap","Bootstrap（有放回抽樣）","報酬與回撤皆重新抽樣"]].map(([v,t,d])=>
+              <button key={v} onClick={()=>setMcState(s=>({...s, mode:v}))}
+                className={"flex-1 text-left border rounded-xl p-3 "+(mode===v?"border-blue-600 ring-2 ring-blue-100 bg-blue-50":"border-slate-300 bg-white hover:border-blue-300")}>
+                <div className="text-sm font-bold">{t}</div>
+                <div className="text-xs text-slate-500 mt-1">{d}</div>
+              </button>)}
+          </div>
+        </Field>
+        <Field label="模擬次數">
+          <input type="number" className={inputCls+" max-w-xs"} value={nSims} min="10" max="100000" step="100"
+            onChange={e=>setMcState(s=>({...s, nSims:+e.target.value}))}/>
+        </Field>
+        <div>
+          <button onClick={onRun} disabled={disabled || (job && job.status==="running")}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-lg px-6 py-2.5 text-sm font-bold">
+            {job && job.status==="running" ? "模擬中..." : "執行模擬"}
+          </button>
+          {disabled && <div className="text-sm text-red-600 mt-2">交易筆數不足（至少 2 筆），請調整策略或期間。</div>}
+        </div>
+        {job && job.status==="running" &&
+          <div>
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div className="h-full bg-blue-600 transition-all" style={{width:(job.progress*100)+"%"}}/>
+            </div>
+            <div className="text-xs text-slate-500 mt-1 tabular">{(job.progress*100).toFixed(0)}%</div>
+          </div>}
+        {job && job.status==="error" && <div className="text-sm text-red-600">{job.error}</div>}
+        {job && job.status==="done" && <div className="text-sm text-emerald-700 font-medium">✓ 模擬完成，請前往「④ 蒙地卡羅結果」。</div>}
+      </div>
+    </Card>
+  </div>;
+}
+
+/* ---------- page 4: MC results ---------- */
+function MCResultPage({bt, activeCode, mcResults}){
+  const mc = mcResults[activeCode];
+  if(!mc) return <Card><div className="text-slate-400 text-sm">尚未執行蒙地卡羅模擬。</div></Card>;
+  const r = bt.results[activeCode];
+  const pct = q => mc.percentiles.find(p=>p.pct===q);
+  const med = pct(50).drawdown, p95 = pct(95).drawdown, p99 = pct(99).drawdown;
+  const histSpec = {
+    data:[{x:mc.drawdowns.map(d=>d*100), type:"histogram", nbinsx:40,
+           marker:{color:"#93c5fd", line:{color:"#fff", width:1}}, name:"回撤"}],
+    layout:{title:{text:"最大回撤分布", font:{size:14}}, xaxis:{title:"最大回撤 (%)", ticksuffix:"%"},
+      shapes:[[med,"#1d4ed8","中位數"],[p95,"#d97706","95百分位"],[p99,"#dc2626","99百分位"]].map(([v,c])=>
+        ({type:"line", x0:v*100, x1:v*100, y0:0, y1:1, yref:"paper", line:{color:c, width:2, dash:"dash"}})),
+      annotations:[[med,"#1d4ed8","中位數"],[p95,"#d97706","P95"],[p99,"#dc2626","P99"]].map(([v,c,t],i)=>
+        ({x:v*100, y:1-0.08*i, yref:"paper", text:t+" "+(v*100).toFixed(1)+"%", showarrow:false,
+          font:{color:c, size:11}, xanchor:"left"}))}
+  };
+  const spagSpec = {
+    data: mc.paths.map((p,i)=>({y:p, type:"scatter", mode:"lines", hoverinfo:"skip",
+            line:{color:"rgba(148,163,184,0.25)", width:1}, showlegend:false}))
+      .concat([{y:mc.original.equity, type:"scatter", mode:"lines", name:"原始回測",
+                line:{color:"#dc2626", width:2.5}}]),
+    layout:{title:{text:`模擬路徑疊圖（樣本 ${mc.paths.length} 條，紅線＝原始順序）`, font:{size:14}},
+      xaxis:{title:"交易序號"}, yaxis:{tickformat:",.0f"}}
+  };
+  const underestimated = mc.underestimated;
+  return <div className="grid gap-4">
+    <div className={"rounded-xl border p-4 "+(underestimated?"bg-amber-50 border-amber-300":"bg-emerald-50 border-emerald-300")}>
+      <div className="font-bold text-sm mb-1">{underestimated ? "⚠ 風險可能被低估" : "✓ 原始回測的回撤估計尚屬保守"}</div>
+      <div className="text-sm">
+        原始交易序列最大回撤 <b className="tabular">{fmtPct(mc.original.max_drawdown)}</b>，
+        蒙地卡羅 95 百分位回撤 <b className="tabular">{fmtPct(p95)}</b>
+        {underestimated
+          ? "——同一組交易換個順序，就有 5% 的情境回撤比原始結果更深，實際交易時應以 95 百分位（或更深）作為風險預算。"
+          : "——原始交易順序的回撤已接近或深於多數模擬情境，屬於較保守的估計。"}
+        {mc.never_recovered_pct>0 && <span>　另有 <b className="tabular">{fmtPct(mc.never_recovered_pct)}</b> 的模擬至期末仍未回到前高。</span>}
+        <span className="text-slate-500">（日線權益最大回撤為 {fmtPct(r.metrics.max_drawdown)}，含持倉期間的未實現波動，通常較交易序列口徑更深。）</span>
+      </div>
+    </div>
+    <div className="grid lg:grid-cols-2 gap-4">
+      <Card><PlotBox spec={histSpec}/></Card>
+      <Card><PlotBox spec={spagSpec}/></Card>
+    </div>
+    <Card title="百分位數表">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabular">
+          <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+            <th className="text-left py-2">百分位</th><th className="text-right">最大回撤</th>
+            <th className="text-right">回本所需交易數</th>
+            {mc.mode==="bootstrap" && <th className="text-right">總報酬率</th>}</tr></thead>
+          <tbody>{mc.percentiles.map(p=>
+            <tr key={p.pct} className="border-b border-slate-100">
+              <td className="py-1.5 font-medium">P{p.pct}</td>
+              <td className="text-right text-emerald-700">{fmtPct(p.drawdown)}</td>
+              <td className="text-right">{p.recover_trades==null?"未回本":fmtNum(p.recover_trades,0)+" 筆"}</td>
+              {mc.mode==="bootstrap" && <td className="text-right">
+                {fmtPct(percentileOf(mc.totals, 100-p.pct), true)}</td>}
+            </tr>)}</tbody>
+        </table>
+      </div>
+      <div className="text-xs text-slate-400 mt-2">
+        模式：{mc.mode==="reshuffle"?"Reshuffle（打亂順序）":"Bootstrap（有放回抽樣）"}・{fmtNum(mc.n_sims,0)} 次模擬・{mc.n_trades} 筆交易。
+        回本交易數＝自回撤谷底回到前高所需的交易筆數（以模擬中有回本者計）。
+      </div>
+    </Card>
+  </div>;
+}
+function percentileOf(arr, q){
+  const a=[...arr].sort((x,y)=>x-y);
+  const idx=(a.length-1)*q/100, lo=Math.floor(idx), hi=Math.ceil(idx);
+  return a[lo]+(a[hi]-a[lo])*(idx-lo);
+}
+
+/* ---------- page 5: comparison ---------- */
+function ComparePage({bt, mcResults}){
+  if(!bt) return <Card><div className="text-slate-400 text-sm">請先完成回測。</div></Card>;
+  const rows = Object.values(bt.results).map(r=>{
+    const mc = mcResults[r.code];
+    const p95 = mc ? mc.percentiles.find(p=>p.pct===95).drawdown : null;
+    const ratio = p95 ? r.metrics.total_return/Math.abs(p95) : (r.metrics.max_drawdown ? r.metrics.total_return/Math.abs(r.metrics.max_drawdown) : null);
+    return {code:r.code, name:r.name, category:r.category, m:r.metrics, p95, ratio, hasMc:!!mc};
+  });
+  return <Card title="多標的比較">
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm tabular">
+        <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+          <th className="text-left py-2">標的</th><th className="text-left">類別</th>
+          <th className="text-right">報酬率</th><th className="text-right">波動率</th>
+          <th className="text-right">原始最大回撤</th><th className="text-right">MC P95 回撤</th>
+          <th className="text-right">報酬 / 回撤比</th><th className="text-right">交易數</th></tr></thead>
+        <tbody>{rows.map(r=>
+          <tr key={r.code} className="border-b border-slate-100">
+            <td className="py-1.5 font-medium">{r.code} {r.name}</td>
+            <td className="text-slate-500">{r.category}</td>
+            <td className={"text-right "+retColor(r.m.total_return)}>{fmtPct(r.m.total_return,true)}</td>
+            <td className="text-right">{fmtPct(r.m.volatility)}</td>
+            <td className="text-right text-emerald-700">{fmtPct(r.m.max_drawdown)}</td>
+            <td className="text-right text-emerald-700">{r.p95==null?"（未模擬）":fmtPct(r.p95)}</td>
+            <td className="text-right">{fmtNum(r.ratio)}</td>
+            <td className="text-right">{r.m.num_trades}</td>
+          </tr>)}</tbody>
+      </table>
+    </div>
+    <div className="text-xs text-slate-400 mt-2">報酬／回撤比：以 MC P95 回撤為分母（未模擬者以原始最大回撤代替）。逐檔切換至「③」執行模擬後此表自動更新。</div>
+  </Card>;
+}
+
+/* ---------- app ---------- */
+const PAGES = ["① 設定","② 回測結果","③ 蒙地卡羅設定","④ 蒙地卡羅結果","⑤ 多標的比較"];
+function App(){
+  const [page, setPage] = useState(0);
+  const [setup, setSetup] = useState({
+    categories:[], industries:[], securities:[], category:"", industry:"", secCode:"",
+    chips:[], start:"2025-07-01", end:"2026-07-09", strategy:"ma",
+    params:{short:5, long:20, period:14, lower:30, upper:70},
+    capital:1000000, riskPct:10, leverage:1, error:""
+  });
+  const [running, setRunning] = useState(false);
+  const [bt, setBt] = useState(null);
+  const [activeCode, setActiveCode] = useState("");
+  const [mcState, setMcState] = useState({mode:"reshuffle", nSims:1000, job:null});
+  const [mcResults, setMcResults] = useState({});
+
+  const runBacktest = async ()=>{
+    setRunning(true); setSetup(s=>({...s, error:""}));
+    try{
+      const body = {codes:setup.chips.map(c=>c.code), start:setup.start, end:setup.end,
+        strategy:setup.strategy, params:setup.params, capital:setup.capital,
+        risk_pct:setup.riskPct, leverage:setup.leverage};
+      const data = await apiPost("/api/backtest", body);
+      setBt(data); setActiveCode(Object.keys(data.results)[0]); setMcResults({});
+      setMcState(s=>({...s, job:null}));
+      setPage(1);
+    }catch(e){ setSetup(s=>({...s, error:String(e.message||e)})); }
+    setRunning(false);
+  };
+  const runMC = async ()=>{
+    const r = bt.results[activeCode];
+    const {job_id} = await apiPost("/api/montecarlo", {
+      trade_returns:r.trades.map(t=>t.return), n_sims:mcState.nSims,
+      mode:mcState.mode, capital:setup.capital});
+    setMcState(s=>({...s, job:{status:"running", progress:0}}));
+    const poll = async ()=>{
+      const j = await apiGet("/api/montecarlo/"+job_id);
+      setMcState(s=>({...s, job:j}));
+      if(j.status==="running") setTimeout(poll, 250);
+      else if(j.status==="done"){ setMcResults(m=>({...m, [activeCode]:j.result})); setPage(3); }
+    };
+    poll();
+  };
+
+  return <div className="max-w-6xl mx-auto px-4 py-6">
+    <header className="mb-5">
+      <h1 className="text-2xl font-bold">櫃買市場蒙地卡羅回測分析</h1>
+      <p className="text-sm text-slate-500 mt-1">上櫃・興櫃限定｜策略回測 → 交易序列蒙地卡羅模擬 → 回撤風險評估。僅供研究，不構成投資建議。</p>
+    </header>
+    <nav className="flex flex-wrap gap-1 mb-5 bg-white rounded-xl border border-slate-200 p-1.5 shadow-sm">
+      {PAGES.map((p,i)=>
+        <button key={p} onClick={()=>setPage(i)}
+          className={"px-4 py-2 rounded-lg text-sm font-medium "+(page===i?"bg-blue-600 text-white":"text-slate-600 hover:bg-slate-100")}>
+          {p}
+        </button>)}
+    </nav>
+    {page===0 && <SetupPage state={setup} setState={setSetup} onRun={runBacktest} running={running}/>}
+    {page===1 && <ResultPage bt={bt} activeCode={activeCode} setActiveCode={setActiveCode}/>}
+    {page===2 && <MCSetupPage bt={bt} activeCode={activeCode} mcState={mcState} setMcState={setMcState} onRun={runMC}/>}
+    {page===3 && <MCResultPage bt={bt} activeCode={activeCode} mcResults={mcResults}/>}
+    {page===4 && <ComparePage bt={bt} mcResults={mcResults}/>}
+  </div>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
