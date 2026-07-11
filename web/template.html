@@ -1,0 +1,596 @@
+<meta charset="utf-8">
+<title>櫃買市場回測</title>
+<style>
+:root{
+  --ground:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.12); --border-soft:rgba(11,11,11,.07);
+  --accent:#2a78d6; --accent-ink:#fff;
+  --up:#c93a38; --dn:#0a7a3d;
+  --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
+  --shadow:0 1px 2px rgba(11,11,11,.05),0 4px 14px rgba(11,11,11,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --ground:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.14); --border-soft:rgba(255,255,255,.08);
+    --accent:#3987e5; --accent-ink:#0d0d0d;
+    --up:#e66767; --dn:#3dbd7d;
+    --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300; --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
+    --shadow:none;
+  }
+}
+:root[data-theme="light"]{
+  --ground:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.12); --border-soft:rgba(11,11,11,.07);
+  --accent:#2a78d6; --accent-ink:#fff;
+  --up:#c93a38; --dn:#0a7a3d;
+  --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
+  --shadow:0 1px 2px rgba(11,11,11,.05),0 4px 14px rgba(11,11,11,.05);
+}
+:root[data-theme="dark"]{
+  --ground:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.14); --border-soft:rgba(255,255,255,.08);
+  --accent:#3987e5; --accent-ink:#0d0d0d;
+  --up:#e66767; --dn:#3dbd7d;
+  --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300; --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
+  --shadow:none;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font-family:"Segoe UI","Noto Sans TC","Microsoft JhengHei","PingFang TC",system-ui,sans-serif;
+  font-size:15px;line-height:1.55;}
+.wrap{max-width:1080px;margin:0 auto;padding:28px 20px 80px}
+header.masthead{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:6px}
+h1{font-size:24px;font-weight:700;margin:0;letter-spacing:.01em;text-wrap:balance}
+.coverage{font-size:12.5px;color:var(--ink2);border:1px solid var(--border);border-radius:999px;
+  padding:3px 12px;font-variant-numeric:tabular-nums}
+.sub{color:var(--ink2);font-size:13.5px;margin:0 0 22px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.tabs button{appearance:none;background:none;border:none;border-bottom:2px solid transparent;
+  padding:9px 14px;font:inherit;font-weight:600;font-size:14.5px;color:var(--ink2);cursor:pointer}
+.tabs button.active{color:var(--ink);border-bottom-color:var(--accent)}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:4px}
+.card{background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;
+  padding:18px 20px;box-shadow:var(--shadow);margin-bottom:18px}
+.card h2{font-size:15px;font-weight:700;margin:0 0 14px}
+label.fld{display:block;font-size:12.5px;color:var(--ink2);margin-bottom:4px}
+input[type=text],input[type=number],select{
+  font:inherit;font-size:14px;color:var(--ink);background:var(--ground);
+  border:1px solid var(--border);border-radius:7px;padding:7px 10px;width:100%}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.row{display:flex;flex-wrap:wrap;gap:14px}
+.row>div{flex:1 1 150px;min-width:130px}
+.btn{appearance:none;border:none;border-radius:8px;background:var(--accent);color:var(--accent-ink);
+  font:inherit;font-weight:700;font-size:14.5px;padding:10px 22px;cursor:pointer}
+.btn:hover{filter:brightness(1.08)}
+.searchbox{position:relative}
+.suggest{position:absolute;z-index:30;top:calc(100% + 4px);left:0;right:0;max-height:260px;overflow-y:auto;
+  background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow)}
+.suggest div{padding:8px 12px;cursor:pointer;font-size:14px;display:flex;justify-content:space-between;gap:8px}
+.suggest div:hover,.suggest div.hi{background:var(--ground)}
+.suggest .cat{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.chips{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.chip{display:flex;align-items:center;gap:10px;background:var(--ground);border:1px solid var(--border-soft);
+  border-radius:8px;padding:6px 10px;font-size:14px}
+.chip .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.chip .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip .cat{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.chip input{width:74px;text-align:right;font-variant-numeric:tabular-nums;padding:4px 8px}
+.chip .pctmark{color:var(--muted);font-size:12.5px}
+.chip button{appearance:none;border:none;background:none;color:var(--muted);cursor:pointer;
+  font-size:16px;line-height:1;padding:2px 4px;border-radius:4px}
+.chip button:hover{color:var(--up)}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+.tile{background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow)}
+.tile .k{font-size:12px;color:var(--ink2);margin-bottom:2px}
+.tile .v{font-size:21px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.up{color:var(--up)} .dn{color:var(--dn)}
+.grid2{display:grid;grid-template-columns:minmax(280px,2fr) minmax(320px,3fr);gap:18px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+.chartbox{position:relative}
+.chartbox h3{font-size:13.5px;font-weight:600;color:var(--ink2);margin:0 0 8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--ink2);margin-top:6px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+.legend i.sw{width:10px;height:10px;border-radius:3px}
+.tooltip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border);
+  border-radius:7px;padding:6px 10px;font-size:12.5px;box-shadow:var(--shadow);display:none;z-index:20;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.tooltip b{font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+th{font-size:12px;color:var(--ink2);text-align:left;font-weight:600;border-bottom:1px solid var(--border);
+  padding:7px 10px;white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--border-soft);white-space:nowrap}
+td.num,th.num{text-align:right}
+.tablewrap{overflow-x:auto}
+.note{font-size:12.5px;color:var(--muted);margin-top:14px;line-height:1.7}
+.donutrow{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.donutrow svg{flex:none}
+.dlegend{display:flex;flex-direction:column;gap:4px;font-size:12.5px;min-width:0}
+.dlegend span{display:flex;align-items:center;gap:7px;color:var(--ink2)}
+.dlegend i{width:10px;height:10px;border-radius:3px;flex:none}
+.dlegend b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:600}
+.empty{color:var(--muted);font-size:14px;padding:8px 2px}
+.err{color:var(--up);font-size:13.5px;margin-top:10px}
+@media (prefers-reduced-motion: no-preference){
+  .btn{transition:filter .15s}
+  .tabs button{transition:color .15s,border-color .15s}
+}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <h1>台灣櫃買市場回測</h1>
+    <span class="coverage" id="coverage"></span>
+  </header>
+  <p class="sub">上櫃・興櫃・ETF・債券ETF・ETN — 投資組合與單一標的策略回測。資料為靜態快照，僅供研究，不構成投資建議。</p>
+
+  <div class="tabs" role="tablist">
+    <button id="tabbtn-pf" class="active" role="tab" aria-selected="true">投資組合回測</button>
+    <button id="tabbtn-ss" role="tab" aria-selected="false">單一標的策略回測</button>
+  </div>
+
+  <!-- ============ portfolio panel ============ -->
+  <section id="panel-pf">
+    <div class="card">
+      <h2>組合設定</h2>
+      <div class="searchbox">
+        <label class="fld" for="pf-search">加入標的（輸入代號或名稱搜尋，可混搭類別）</label>
+        <input type="text" id="pf-search" placeholder="例：6488、環球晶、00679B、美債" autocomplete="off">
+        <div class="suggest" id="pf-suggest" style="display:none"></div>
+      </div>
+      <div class="chips" id="pf-chips"></div>
+      <div class="row" style="margin-top:14px">
+        <div><label class="fld" for="pf-start">開始日期</label><select id="pf-start"></select></div>
+        <div><label class="fld" for="pf-end">結束日期</label><select id="pf-end"></select></div>
+        <div><label class="fld" for="pf-capital">起始資金 (NTD)</label><input type="number" id="pf-capital" value="1000000" step="100000" min="1"></div>
+        <div><label class="fld" for="pf-rebalance">再平衡頻率</label>
+          <select id="pf-rebalance">
+            <option value="none">不再平衡（買進持有）</option>
+            <option value="monthly">每月</option>
+            <option value="quarterly">每季</option>
+          </select></div>
+      </div>
+      <div style="margin-top:16px"><button class="btn" id="pf-run">執行組合回測</button><span class="err" id="pf-err"></span></div>
+    </div>
+    <div id="pf-results"></div>
+  </section>
+
+  <!-- ============ single-stock panel ============ -->
+  <section id="panel-ss" style="display:none">
+    <div class="card">
+      <h2>標的與策略</h2>
+      <div class="searchbox">
+        <label class="fld" for="ss-search">選擇標的</label>
+        <input type="text" id="ss-search" placeholder="輸入代號或名稱搜尋" autocomplete="off">
+        <div class="suggest" id="ss-suggest" style="display:none"></div>
+      </div>
+      <div class="chips" id="ss-chip"></div>
+      <div class="row" style="margin-top:14px">
+        <div><label class="fld" for="ss-strategy">策略</label>
+          <select id="ss-strategy">
+            <option value="ma">均線交叉</option>
+            <option value="rsi">RSI 門檻</option>
+            <option value="boll">布林通道</option>
+          </select></div>
+        <div id="ss-params" style="flex:3 1 320px;display:flex;gap:14px;flex-wrap:wrap"></div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div><label class="fld" for="ss-capital">起始資金</label><input type="number" id="ss-capital" value="1000000" step="100000" min="1"></div>
+        <div><label class="fld" for="ss-comm">手續費率 (%)</label><input type="number" id="ss-comm" value="0.1425" step="0.01" min="0"></div>
+        <div><label class="fld" for="ss-disc">手續費折數</label><input type="number" id="ss-disc" value="1" step="0.1" min="0.1" max="1"></div>
+        <div><label class="fld" for="ss-tax">證交稅率 (%，賣出)</label><input type="number" id="ss-tax" value="0.3" step="0.05" min="0"></div>
+        <div><label class="fld" for="ss-slip">滑價 (bp)</label><input type="number" id="ss-slip" value="0" step="1" min="0"></div>
+      </div>
+      <div style="margin-top:16px"><button class="btn" id="ss-run">執行回測</button><span class="err" id="ss-err"></span></div>
+    </div>
+    <div id="ss-results"></div>
+  </section>
+</div>
+
+<script>
+"use strict";
+const DATA = __DATA_JSON__;
+const DATES = DATA.dates, N = DATES.length;
+const CAT_COLOR = {"上櫃":"var(--s1)","興櫃":"var(--s8)","ETF":"var(--s2)","債券ETF":"var(--s5)","ETN":"var(--s7)"};
+const SLOTS = ["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)","var(--s7)","var(--s8)"];
+document.getElementById("coverage").textContent =
+  `資料 ${DATES[0]} ~ ${DATES[N-1]}・${DATA.securities.length} 檔標的`;
+
+/* ---------- utils ---------- */
+const fmtPct = (x,sign)=> !isFinite(x)? "-" : ((sign&&x>0?"+":"")+(x*100).toFixed(2)+"%");
+const fmtNum = x=> x==null? "-" : x.toLocaleString("zh-TW",{maximumFractionDigits:2});
+const fmtMoney = x=> "NT$ "+Math.round(x).toLocaleString("zh-TW");
+const retCls = x=> !isFinite(x)||x===0? "" : (x>0? "up":"dn");
+function ffill(a){let last=null;return a.map(v=>v==null?last:(last=v));}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function stats(equity, dates){
+  const n=equity.length;
+  const total = equity[n-1]/equity[0]-1;
+  const days = (new Date(dates[n-1])-new Date(dates[0]))/864e5;
+  const years = days/365.25;
+  const cagr = years>0 ? Math.pow(equity[n-1]/equity[0],1/years)-1 : NaN;
+  const rets=[]; for(let i=1;i<n;i++) rets.push(equity[i]/equity[i-1]-1);
+  const mean = rets.reduce((a,b)=>a+b,0)/rets.length;
+  const vol = Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length)*Math.sqrt(252);
+  const sharpe = vol>0 ? mean*252/vol : NaN;
+  let peak=-Infinity, mdd=0;
+  for(const v of equity){ if(v>peak)peak=v; const dd=v/peak-1; if(dd<mdd)mdd=dd; }
+  return {total, cagr, vol, sharpe, mdd};
+}
+
+/* ---------- search dropdown ---------- */
+function attachSearch(inputEl, listEl, onPick){
+  let items=[], hi=-1;
+  function close(){ listEl.style.display="none"; items=[]; hi=-1; }
+  function render(){
+    listEl.innerHTML = items.map((s,i)=>
+      `<div data-i="${i}" class="${i===hi?'hi':''}"><span>${esc(s.c)} ${esc(s.n)}</span><span class="cat">${esc(s.k)}</span></div>`).join("");
+    listEl.style.display = items.length? "block":"none";
+  }
+  inputEl.addEventListener("input", ()=>{
+    const q = inputEl.value.trim().toLowerCase();
+    if(!q){ close(); return; }
+    items = DATA.securities.filter(s=> s.c.toLowerCase().includes(q)||s.n.toLowerCase().includes(q)).slice(0,12);
+    hi = items.length? 0 : -1;
+    render();
+  });
+  inputEl.addEventListener("keydown", e=>{
+    if(!items.length) return;
+    if(e.key==="ArrowDown"){ hi=Math.min(hi+1,items.length-1); render(); e.preventDefault(); }
+    else if(e.key==="ArrowUp"){ hi=Math.max(hi-1,0); render(); e.preventDefault(); }
+    else if(e.key==="Enter"){ if(hi>=0){ onPick(items[hi]); inputEl.value=""; close(); } e.preventDefault(); }
+    else if(e.key==="Escape"){ close(); }
+  });
+  listEl.addEventListener("mousedown", e=>{
+    const d=e.target.closest("[data-i]");
+    if(d){ onPick(items[+d.dataset.i]); inputEl.value=""; close(); e.preventDefault(); }
+  });
+  document.addEventListener("click", e=>{ if(!listEl.contains(e.target)&&e.target!==inputEl) close(); });
+}
+
+/* ---------- SVG charts ---------- */
+function lineChart(el,{series,labels,yFmt=fmtNum,height=300,fill=false,markers=[]}){
+  el.innerHTML="";
+  const W = Math.max(el.clientWidth||640,320), H=height;
+  const padL=62,padR=14,padT=14,padB=30;
+  let ymin=Infinity,ymax=-Infinity;
+  for(const s of series) for(const v of s.values){ if(v==null)continue; if(v<ymin)ymin=v; if(v>ymax)ymax=v; }
+  if(fill){ ymax=Math.max(ymax,0); }
+  if(ymin===ymax){ ymin-=1; ymax+=1; }
+  const span=ymax-ymin; ymin-=span*.04; ymax+=span*.04;
+  const n=labels.length;
+  const x=i=> padL+(W-padL-padR)*(n<2?0.5:i/(n-1));
+  const y=v=> padT+(H-padT-padB)*(1-(v-ymin)/(ymax-ymin));
+  let g="";
+  for(let k=0;k<=4;k++){
+    const v=ymin+(ymax-ymin)*k/4, yy=y(v);
+    g+=`<line x1="${padL}" x2="${W-padR}" y1="${yy}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    g+=`<text x="${padL-8}" y="${yy+4}" text-anchor="end" font-size="11" fill="var(--muted)">${yFmt(v)}</text>`;
+  }
+  const step=Math.max(1,Math.floor(n/5));
+  for(let i=0;i<n;i+=step){
+    g+=`<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-size="11" fill="var(--muted)">${labels[i].slice(5)}</text>`;
+  }
+  g+=`<line x1="${padL}" x2="${W-padR}" y1="${H-padB}" y2="${H-padB}" stroke="var(--axis)" stroke-width="1"/>`;
+  for(const s of series){
+    let d="", started=false;
+    s.values.forEach((v,i)=>{ if(v==null){return;} d+=(started?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1); started=true; });
+    if(fill){
+      let area=d+`L${x(n-1).toFixed(1)} ${y(Math.min(0,ymax)).toFixed(1)}L${x(0).toFixed(1)} ${y(Math.min(0,ymax)).toFixed(1)}Z`;
+      g+=`<path d="${area}" fill="${s.color}" opacity="0.16" stroke="none"/>`;
+    }
+    g+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" ${s.dash?'stroke-dasharray="6 4"':''} stroke-linejoin="round"/>`;
+  }
+  for(const m of markers){
+    const cx=x(m.i), cy=y(m.v);
+    if(m.type==="buy") g+=`<path d="M${cx} ${cy-11}l6 10h-12z" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"/>`;
+    else g+=`<path d="M${cx} ${cy+11}l6 -10h-12z" fill="var(--s8)" stroke="var(--surface)" stroke-width="1.5"/>`;
+  }
+  const svg=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img">${g}
+    <line id="xh" y1="${padT}" y2="${H-padB}" stroke="var(--axis)" stroke-width="1" style="display:none"/>
+    <rect x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="transparent"/></svg>`;
+  el.insertAdjacentHTML("beforeend", svg);
+  const tip=document.createElement("div"); tip.className="tooltip"; el.appendChild(tip);
+  const svgEl=el.querySelector("svg"), xh=svgEl.querySelector("#xh");
+  svgEl.addEventListener("mousemove", ev=>{
+    const r=svgEl.getBoundingClientRect();
+    const px=(ev.clientX-r.left)*(W/r.width);
+    let i=Math.round((px-padL)/((W-padL-padR)/(n<2?1:n-1)));
+    i=Math.max(0,Math.min(n-1,i));
+    xh.setAttribute("x1",x(i)); xh.setAttribute("x2",x(i)); xh.style.display="block";
+    let html=`<b>${labels[i]}</b>`;
+    for(const s of series){ const v=s.values[i]; if(v!=null) html+=`<br>${esc(s.name)}：${yFmt(v)}`; }
+    tip.innerHTML=html; tip.style.display="block";
+    const bx=ev.clientX-r.left, half=el.clientWidth/2;
+    tip.style.left = bx<half ? (bx+14)+"px" : "";
+    tip.style.right = bx<half ? "" : (el.clientWidth-bx+14)+"px";
+    tip.style.top=(ev.clientY-r.top+12)+"px";
+  });
+  svgEl.addEventListener("mouseleave", ()=>{ tip.style.display="none"; xh.style.display="none"; });
+  if(series.length>1){
+    const lg=document.createElement("div"); lg.className="legend";
+    lg.innerHTML=series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+    el.appendChild(lg);
+  }
+}
+
+function donut(el, items){
+  el.innerHTML="";
+  const total=items.reduce((a,b)=>a+b.value,0)||1;
+  const R=76, r=46, C=88;
+  let a0=-Math.PI/2, paths="";
+  for(const it of items){
+    const frac=it.value/total, a1=a0+frac*2*Math.PI-0.0001;
+    const large=frac>0.5?1:0;
+    const p=(a,rad)=>[C+rad*Math.cos(a),C+rad*Math.sin(a)];
+    const [x0,y0]=p(a0,R),[x1,y1]=p(a1,R),[x2,y2]=p(a1,r),[x3,y3]=p(a0,r);
+    paths+=`<path d="M${x0} ${y0}A${R} ${R} 0 ${large} 1 ${x1} ${y1}L${x2} ${y2}A${r} ${r} 0 ${large} 0 ${x3} ${y3}Z" fill="${it.color}" stroke="var(--surface)" stroke-width="2"/>`;
+    a0=a1+0.0001;
+  }
+  const wrap=document.createElement("div"); wrap.className="donutrow";
+  wrap.innerHTML=`<svg viewBox="0 0 176 176" width="150" height="150" role="img">${paths}</svg>
+    <div class="dlegend">${items.map(it=>
+      `<span><i style="background:${it.color}"></i>${esc(it.label)}　<b>${fmtPct(it.value/total)}</b></span>`).join("")}</div>`;
+  el.appendChild(wrap);
+}
+
+/* ---------- portfolio ---------- */
+const pfSel=[];
+function pfRenderChips(){
+  const box=document.getElementById("pf-chips");
+  if(!pfSel.length){ box.innerHTML=`<div class="empty">尚未加入標的。</div>`; return; }
+  box.innerHTML=pfSel.map((s,i)=>`
+    <div class="chip">
+      <span class="dot" style="background:${SLOTS[i%8]}"></span>
+      <span class="nm">${esc(s.sec.c)} ${esc(s.sec.n)}</span>
+      <span class="cat">${esc(s.sec.k)}</span>
+      <input type="number" value="${s.w}" min="0" max="100" step="1" data-i="${i}" aria-label="權重">
+      <span class="pctmark">%</span>
+      <button data-del="${i}" title="移除" aria-label="移除">✕</button>
+    </div>`).join("");
+  box.querySelectorAll("input").forEach(inp=> inp.addEventListener("change",()=>{ pfSel[+inp.dataset.i].w=+inp.value||0; }));
+  box.querySelectorAll("[data-del]").forEach(b=> b.addEventListener("click",()=>{ pfSel.splice(+b.dataset.del,1); pfEqualize(); }));
+}
+function pfEqualize(){
+  const w=+(100/Math.max(pfSel.length,1)).toFixed(2);
+  pfSel.forEach(s=>s.w=w);
+  pfRenderChips();
+}
+attachSearch(document.getElementById("pf-search"), document.getElementById("pf-suggest"), sec=>{
+  if(pfSel.some(s=>s.sec.c===sec.c&&s.sec.m===sec.m)) return;
+  pfSel.push({sec,w:0}); pfEqualize();
+});
+pfRenderChips();
+for(const [id,def] of [["pf-start",0],["pf-end",N-1]]){
+  const sel=document.getElementById(id);
+  sel.innerHTML=DATES.map((d,i)=>`<option value="${i}" ${i===def?"selected":""}>${d}</option>`).join("");
+}
+
+function runPortfolio(){
+  const err=document.getElementById("pf-err"); err.textContent="";
+  const out=document.getElementById("pf-results"); out.innerHTML="";
+  if(!pfSel.length){ err.textContent="請先加入至少一檔標的。"; return; }
+  const i0=+document.getElementById("pf-start").value, i1=+document.getElementById("pf-end").value;
+  if(i1<=i0){ err.textContent="結束日期需晚於開始日期。"; return; }
+  const capital=+document.getElementById("pf-capital").value||1e6;
+  const rebalance=document.getElementById("pf-rebalance").value;
+  const wsum=pfSel.reduce((a,s)=>a+s.w,0);
+  if(wsum<=0){ err.textContent="權重總和必須大於 0。"; return; }
+
+  const filled=pfSel.map(s=>ffill(s.sec.p.slice(0,i1+1)));
+  let start=-1;
+  for(let i=i0;i<=i1;i++){ if(filled.every(p=>p[i]!=null)){ start=i; break; } }
+  if(start<0||i1-start<1){ err.textContent="重疊的交易日不足（所選標的在此區間沒有共同的價格資料）。"; return; }
+  const idxs=[]; for(let i=start;i<=i1;i++) idxs.push(i);
+
+  const w=pfSel.map(s=>s.w/wsum);
+  const perKey=d=> rebalance==="monthly"? d.slice(0,7)
+    : rebalance==="quarterly"? d.slice(0,4)+"Q"+Math.floor((+d.slice(5,7)-1)/3) : null;
+  let shares=null,equityNow=capital,lastKey=null;
+  const eq=[];
+  for(const i of idxs){
+    const key=perKey(DATES[i]);
+    if(shares===null||(key!==null&&key!==lastKey)) shares=filled.map((p,j)=>equityNow*w[j]/p[i]);
+    lastKey=key;
+    equityNow=filled.reduce((a,p,j)=>a+shares[j]*p[i],0);
+    eq.push(equityNow);
+  }
+  const dts=idxs.map(i=>DATES[i]);
+  const st=stats(eq,dts);
+  const assetRet=filled.map(p=>p[idxs[idxs.length-1]]/p[idxs[0]]-1);
+
+  const idxFilled=ffill(DATA.index.slice(0,i1+1));
+  let bench=null, benchRet=NaN;
+  if(idxFilled[idxs[0]]!=null){
+    bench=idxs.map(i=>capital*idxFilled[i]/idxFilled[idxs[0]]);
+    benchRet=idxFilled[idxs[idxs.length-1]]/idxFilled[idxs[0]]-1;
+  }
+  const excess=isFinite(benchRet)? st.total-benchRet : NaN;
+
+  const tiles=[
+    ["組合報酬率",fmtPct(st.total,true),retCls(st.total)],
+    ["大盤報酬率（櫃買指數）",fmtPct(benchRet,true),retCls(benchRet)],
+    ["超額報酬",fmtPct(excess,true),retCls(excess)],
+    ["年化報酬率 (CAGR)",fmtPct(st.cagr,true),retCls(st.cagr)],
+    ["Sharpe",isFinite(st.sharpe)?st.sharpe.toFixed(2):"-",""],
+    ["最大回撤",fmtPct(st.mdd),"dn"],
+  ];
+  out.innerHTML=`
+    <div class="metrics">${tiles.map(t=>`<div class="tile"><div class="k">${t[0]}</div><div class="v ${t[2]}">${t[1]}</div></div>`).join("")}</div>
+    <div class="grid2">
+      <div>
+        <div class="card chartbox"><h3>組合配置</h3><div id="pf-pie1"></div></div>
+        <div class="card chartbox"><h3>類別占比</h3><div id="pf-pie2"></div></div>
+      </div>
+      <div>
+        <div class="card chartbox"><h3>權益曲線 vs 大盤</h3><div id="pf-eq"></div></div>
+        <div class="card chartbox"><h3>組合回撤</h3><div id="pf-dd"></div></div>
+      </div>
+    </div>
+    <div class="card"><h2>各標的明細</h2><div class="tablewrap"><table>
+      <thead><tr><th>標的</th><th>類別</th><th class="num">權重</th><th class="num">期初價</th><th class="num">期末價</th><th class="num">期間報酬率</th></tr></thead>
+      <tbody>${pfSel.map((s,j)=>`<tr>
+        <td><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${SLOTS[j%8]};margin-right:7px"></span>${esc(s.sec.c)} ${esc(s.sec.n)}</td>
+        <td>${esc(s.sec.k)}</td><td class="num">${fmtPct(w[j])}</td>
+        <td class="num">${fmtNum(filled[j][idxs[0]])}</td><td class="num">${fmtNum(filled[j][idxs[idxs.length-1]])}</td>
+        <td class="num ${retCls(assetRet[j])}">${fmtPct(assetRet[j],true)}</td></tr>`).join("")}
+      </tbody></table></div>
+      <div class="note">實際回測區間：${dts[0]} ~ ${dts[dts.length-1]}（自所有標的皆有價格的第一天起算）。興櫃以最後成交價計算；組合回測未計入交易成本。紅漲綠跌。</div>
+    </div>`;
+
+  donut(document.getElementById("pf-pie1"),
+    pfSel.map((s,j)=>({label:`${s.sec.c} ${s.sec.n}`,value:w[j],color:SLOTS[j%8]})));
+  const catAgg={};
+  pfSel.forEach((s,j)=>{ catAgg[s.sec.k]=(catAgg[s.sec.k]||0)+w[j]; });
+  donut(document.getElementById("pf-pie2"),
+    Object.entries(catAgg).map(([k,v])=>({label:k,value:v,color:CAT_COLOR[k]||"var(--s3)"})));
+  const series=[{name:"投資組合",color:"var(--s1)",values:eq}];
+  if(bench) series.push({name:"櫃買指數（同額投入）",color:"var(--muted)",dash:true,values:bench});
+  lineChart(document.getElementById("pf-eq"),{series,labels:dts,yFmt:x=>(x/1e6).toFixed(2)+"M",height:300});
+  let peak=-Infinity; const dd=eq.map(v=>{ if(v>peak)peak=v; return v/peak-1; });
+  lineChart(document.getElementById("pf-dd"),{series:[{name:"回撤",color:"var(--up)",values:dd}],
+    labels:dts,yFmt:x=>(x*100).toFixed(1)+"%",height:210,fill:true});
+}
+document.getElementById("pf-run").addEventListener("click",runPortfolio);
+
+/* ---------- single stock ---------- */
+let ssSec=null;
+attachSearch(document.getElementById("ss-search"), document.getElementById("ss-suggest"), sec=>{
+  ssSec=sec; ssRenderChip();
+});
+function ssRenderChip(){
+  const box=document.getElementById("ss-chip");
+  box.innerHTML = ssSec
+    ? `<div class="chip"><span class="dot" style="background:${CAT_COLOR[ssSec.k]||"var(--s1)"}"></span>
+       <span class="nm">${esc(ssSec.c)} ${esc(ssSec.n)}</span><span class="cat">${esc(ssSec.k)}</span></div>`
+    : `<div class="empty">尚未選擇標的。</div>`;
+}
+ssRenderChip();
+
+const SS_PARAMS={
+  ma:[["short","短期均線",5],["long","長期均線",20]],
+  rsi:[["period","RSI 週期",14],["lower","買進門檻",30],["upper","賣出門檻",70]],
+  boll:[["window","窗口天數",20],["k","標準差倍數",2]],
+};
+function ssRenderParams(){
+  const kind=document.getElementById("ss-strategy").value;
+  document.getElementById("ss-params").innerHTML=SS_PARAMS[kind].map(([id,label,val])=>
+    `<div style="flex:1 1 90px"><label class="fld" for="ssp-${id}">${label}</label>
+     <input type="number" id="ssp-${id}" value="${val}" step="${id==="k"?0.1:1}"></div>`).join("");
+}
+ssRenderParams();
+document.getElementById("ss-strategy").addEventListener("change",ssRenderParams);
+
+function sigMA(c,s,l){
+  const ma=(w)=>c.map((_,i)=> i<w-1? null : c.slice(i-w+1,i+1).reduce((a,b)=>a+b,0)/w);
+  const m1=ma(s),m2=ma(l);
+  return c.map((_,i)=> m2[i]!=null&&m1[i]>m2[i] ? 1:0);
+}
+function sigRSI(c,period,lo,hi){
+  const rsi=[]; let ag=0,al=0;
+  for(let i=0;i<c.length;i++){
+    if(i===0){ rsi.push(50); continue; }
+    const d=c[i]-c[i-1], g=Math.max(d,0), L=Math.max(-d,0);
+    if(i<=period){ ag+=g/period; al+=L/period; rsi.push(50); continue; }
+    ag=(ag*(period-1)+g)/period; al=(al*(period-1)+L)/period;
+    rsi.push(al===0?100:100-100/(1+ag/al));
+  }
+  let inPos=false;
+  return rsi.map(v=>{ if(!inPos&&v<lo)inPos=true; else if(inPos&&v>hi)inPos=false; return inPos?1:0; });
+}
+function sigBoll(c,w,k){
+  let inPos=false;
+  return c.map((v,i)=>{
+    if(i<w-1) return (inPos=false,0);
+    const win=c.slice(i-w+1,i+1), m=win.reduce((a,b)=>a+b,0)/w;
+    const sd=Math.sqrt(win.reduce((a,b)=>a+(b-m)*(b-m),0)/(w-1));
+    if(!inPos&&v<m-k*sd)inPos=true; else if(inPos&&v>m+k*sd)inPos=false;
+    return inPos?1:0;
+  });
+}
+
+function runSingle(){
+  const err=document.getElementById("ss-err"); err.textContent="";
+  const out=document.getElementById("ss-results"); out.innerHTML="";
+  if(!ssSec){ err.textContent="請先選擇標的。"; return; }
+  const closes=[],dts=[];
+  ssSec.p.forEach((v,i)=>{ if(v!=null){ closes.push(v); dts.push(DATES[i]); } });
+  if(closes.length<3){ err.textContent="此標的價格資料不足。"; return; }
+  const kind=document.getElementById("ss-strategy").value;
+  const P=id=> +document.getElementById("ssp-"+id).value;
+  let sig,label;
+  if(kind==="ma"){ const s=P("short"),l=P("long");
+    if(s>=l){ err.textContent="短期均線需小於長期均線。"; return; }
+    sig=sigMA(closes,s,l); label=`均線交叉 (${s}/${l})`; }
+  else if(kind==="rsi"){ sig=sigRSI(closes,P("period"),P("lower"),P("upper")); label=`RSI(${P("period")}) ${P("lower")}/${P("upper")}`; }
+  else { sig=sigBoll(closes,P("window"),P("k")); label=`布林通道 (${P("window")}, ${P("k")}σ)`; }
+
+  const capital=+document.getElementById("ss-capital").value||1e6;
+  const comm=(+document.getElementById("ss-comm").value/100)*(+document.getElementById("ss-disc").value);
+  const tax=+document.getElementById("ss-tax").value/100;
+  const slip=+document.getElementById("ss-slip").value/1e4;
+
+  const pos=sig.map((_,i)=> i===0?0:sig[i-1]);
+  const eq=[capital]; const markers=[]; const trades=[]; let entry=null;
+  for(let i=1;i<closes.length;i++){
+    const chg=pos[i]-pos[i-1];
+    let cost=0;
+    if(chg>0){ cost=comm+slip; markers.push({i,type:"buy",v:closes[i]}); entry={date:dts[i],price:closes[i]}; }
+    else if(chg<0){ cost=comm+tax+slip; markers.push({i,type:"sell",v:closes[i]});
+      if(entry){ trades.push({...entry,exitDate:dts[i],exitPrice:closes[i],open:false}); entry=null; } }
+    const r=pos[i]*(closes[i]/closes[i-1]-1)-cost;
+    eq.push(eq[i-1]*(1+r));
+  }
+  if(entry) trades.push({...entry,exitDate:dts[dts.length-1],exitPrice:closes[closes.length-1],open:true});
+  const st=stats(eq,dts);
+  const rets=trades.map(t=>t.exitPrice/t.price-1);
+  const wins=rets.filter(r=>r>0);
+  const winRate=trades.length? wins.length/trades.length : NaN;
+  const avgRet=trades.length? rets.reduce((a,b)=>a+b,0)/trades.length : NaN;
+
+  const tiles=[
+    ["總報酬率",fmtPct(st.total,true),retCls(st.total)],
+    ["年化報酬率 (CAGR)",fmtPct(st.cagr,true),retCls(st.cagr)],
+    ["年化波動度",fmtPct(st.vol),""],
+    ["Sharpe",isFinite(st.sharpe)?st.sharpe.toFixed(2):"-",""],
+    ["最大回撤",fmtPct(st.mdd),"dn"],
+    ["交易次數",String(trades.length),""],
+    ["勝率",fmtPct(winRate),""],
+    ["平均每筆報酬",fmtPct(avgRet,true),retCls(avgRet)],
+  ];
+  out.innerHTML=`
+    <div class="card chartbox" style="margin-bottom:10px"><h3>${esc(ssSec.c)} ${esc(ssSec.n)}（${esc(ssSec.k)}）　策略：${esc(label)}</h3></div>
+    <div class="metrics">${tiles.map(t=>`<div class="tile"><div class="k">${t[0]}</div><div class="v ${t[2]}">${t[1]}</div></div>`).join("")}</div>
+    <div class="card chartbox"><h3>收盤價與買賣點</h3><div id="ss-price"></div>
+      <div class="legend"><span><i class="sw" style="background:var(--s1)"></i>▲ 買進</span><span><i class="sw" style="background:var(--s8)"></i>▼ 賣出</span></div></div>
+    <div class="card chartbox"><h3>權益曲線</h3><div id="ss-eq"></div></div>
+    <div class="card"><h2>交易明細</h2>${trades.length? `<div class="tablewrap"><table>
+      <thead><tr><th>進場日</th><th class="num">進場價</th><th>出場日</th><th class="num">出場價</th><th class="num">報酬率</th><th>狀態</th></tr></thead>
+      <tbody>${trades.map((t,i)=>`<tr><td>${t.date}</td><td class="num">${fmtNum(t.price)}</td>
+        <td>${t.exitDate}</td><td class="num">${fmtNum(t.exitPrice)}</td>
+        <td class="num ${retCls(rets[i])}">${fmtPct(rets[i],true)}</td>
+        <td>${t.open?"持有中（未平倉）":"已平倉"}</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">此區間內策略未產生任何交易。</div>`}
+      <div class="note">訊號於次一交易日以收盤價執行（避免未來函數）。成本設定：手續費 ${document.getElementById("ss-comm").value}% × ${document.getElementById("ss-disc").value} 折、賣出證交稅 ${document.getElementById("ss-tax").value}%。紅漲綠跌。</div></div>`;
+
+  lineChart(document.getElementById("ss-price"),{series:[{name:"收盤價",color:"var(--ink2)",values:closes}],
+    labels:dts,height:300,markers});
+  lineChart(document.getElementById("ss-eq"),{series:[{name:"權益",color:"var(--s1)",values:eq}],
+    labels:dts,yFmt:x=>(x/1e6).toFixed(2)+"M",height:240});
+}
+document.getElementById("ss-run").addEventListener("click",runSingle);
+
+/* ---------- tabs ---------- */
+const tabBtns={pf:document.getElementById("tabbtn-pf"),ss:document.getElementById("tabbtn-ss")};
+const panels={pf:document.getElementById("panel-pf"),ss:document.getElementById("panel-ss")};
+for(const key of ["pf","ss"]){
+  tabBtns[key].addEventListener("click",()=>{
+    for(const k of ["pf","ss"]){
+      tabBtns[k].classList.toggle("active",k===key);
+      tabBtns[k].setAttribute("aria-selected",k===key?"true":"false");
+      panels[k].style.display = k===key? "":"none";
+    }
+  });
+}
+</script>
