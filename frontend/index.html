@@ -388,7 +388,33 @@ function percentileOf(arr, q){
   return a[lo]+(a[hi]-a[lo])*(idx-lo);
 }
 
-/* ---------- page 5: comparison ---------- */
+/* ---------- page 5: comparison (joint report) ---------- */
+const COMPARE_PALETTE = ["#2563eb","#0d9488","#d97706","#7c3aed","#dc2626","#059669","#db2777","#4b5563"];
+
+function metricBarSpec(rows, valueFn, title, tickfmt, barColor){
+  return {
+    data:[{
+      x: rows.map(r=>r.code),
+      y: rows.map(r=>valueFn(r)),
+      type:"bar",
+      marker:{color: rows.map((_,i)=>barColor||COMPARE_PALETTE[i%8])},
+      text: rows.map(r=>{
+        const v=valueFn(r);
+        return tickfmt==="pct" ? fmtPct(v,true) : fmtNum(v);
+      }),
+      hovertext: rows.map(r=>`${r.code} ${r.name}`),
+      hoverinfo:"text+y",
+      textposition:"outside",
+    }],
+    layout:{
+      title:{text:title, font:{size:13}},
+      yaxis:{tickformat: tickfmt==="pct" ? ",.0%" : ",.2f"},
+      xaxis:{type:"category", tickfont:{size:11}},
+      margin:{t:36},
+    }
+  };
+}
+
 function ComparePage({bt, mcResults}){
   if(!bt) return <Card><div className="text-slate-400 text-sm">請先完成回測。</div></Card>;
   const rows = Object.values(bt.results).map(r=>{
@@ -397,29 +423,81 @@ function ComparePage({bt, mcResults}){
     const ratio = p95 ? r.metrics.total_return/Math.abs(p95) : (r.metrics.max_drawdown ? r.metrics.total_return/Math.abs(r.metrics.max_drawdown) : null);
     return {code:r.code, name:r.name, category:r.category, m:r.metrics, p95, ratio, hasMc:!!mc};
   });
-  return <Card title="多標的比較">
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm tabular">
-        <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
-          <th className="text-left py-2">標的</th><th className="text-left">類別</th>
-          <th className="text-right">報酬率</th><th className="text-right">波動率</th>
-          <th className="text-right">原始最大回撤</th><th className="text-right">MC P95 回撤</th>
-          <th className="text-right">報酬 / 回撤比</th><th className="text-right">交易數</th></tr></thead>
-        <tbody>{rows.map(r=>
-          <tr key={r.code} className="border-b border-slate-100">
-            <td className="py-1.5 font-medium">{r.code} {r.name}</td>
-            <td className="text-slate-500">{r.category}</td>
-            <td className={"text-right "+retColor(r.m.total_return)}>{fmtPct(r.m.total_return,true)}</td>
-            <td className="text-right">{fmtPct(r.m.volatility)}</td>
-            <td className="text-right text-emerald-700">{fmtPct(r.m.max_drawdown)}</td>
-            <td className="text-right text-emerald-700">{r.p95==null?"（未模擬）":fmtPct(r.p95)}</td>
-            <td className="text-right">{fmtNum(r.ratio)}</td>
-            <td className="text-right">{r.m.num_trades}</td>
-          </tr>)}</tbody>
-      </table>
+  const mcRows = rows.filter(r=>r.hasMc);
+
+  // headline insight: best risk-adjusted (ratio) and worst drawdown
+  const ranked = [...rows].filter(r=>r.ratio!=null).sort((a,b)=>b.ratio-a.ratio);
+  const best = ranked[0], worst = [...rows].sort((a,b)=>a.m.max_drawdown-b.m.max_drawdown)[0];
+
+  const eqSpec = {
+    data: rows.map((r,i)=>({
+      x: bt.results[r.code].dates, y: bt.results[r.code].equity_curve,
+      type:"scatter", mode:"lines", name:`${r.code} ${r.name}`,
+      line:{color:COMPARE_PALETTE[i%8], width:2},
+    })),
+    layout:{title:{text:"權益曲線比較（同一起始本金）", font:{size:14}}, yaxis:{tickformat:",.0f"},
+      legend:{orientation:"h", y:1.15}}
+  };
+
+  const ddOverlaySpec = mcRows.length ? {
+    data: mcRows.map((r,i)=>({
+      x: mcResults[r.code].drawdowns.map(d=>d*100),
+      type:"histogram", histnorm:"probability", opacity:0.55, nbinsx:30,
+      name:`${r.code} ${r.name}`, marker:{color:COMPARE_PALETTE[i%8]},
+    })),
+    layout:{title:{text:"蒙地卡羅回撤分布疊圖", font:{size:14}}, barmode:"overlay",
+      xaxis:{title:"最大回撤 (%)", ticksuffix:"%"}, yaxis:{tickformat:",.0%"},
+      legend:{orientation:"h", y:1.15}}
+  } : null;
+
+  return <div className="grid gap-4">
+    <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm">
+      <div className="font-bold mb-1">共同報告摘要</div>
+      <div>
+        本次共比較 <b>{rows.length}</b> 檔標的。
+        {best && <span>風險調整後表現最佳：<b>{best.code} {best.name}</b>（報酬／回撤比 {fmtNum(best.ratio)}）。</span>}
+        {worst && <span>　原始最大回撤最深：<b>{worst.code} {worst.name}</b>（{fmtPct(worst.m.max_drawdown)}）。</span>}
+        {mcRows.length < rows.length && <span className="text-slate-500">　尚有 {rows.length-mcRows.length} 檔未執行蒙地卡羅模擬，請至「③」逐檔執行以納入完整風險比較。</span>}
+      </div>
     </div>
-    <div className="text-xs text-slate-400 mt-2">報酬／回撤比：以 MC P95 回撤為分母（未模擬者以原始最大回撤代替）。逐檔切換至「③」執行模擬後此表自動更新。</div>
-  </Card>;
+
+    <Card><PlotBox spec={eqSpec} height={360}/></Card>
+
+    <div className="grid md:grid-cols-2 gap-4">
+      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.total_return, "報酬率比較", "pct")} height={260}/></Card>
+      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.volatility, "波動率比較", "pct")} height={260}/></Card>
+      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.max_drawdown, "原始最大回撤比較", "pct", "#047857")} height={260}/></Card>
+      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.sharpe, "夏普比率比較", "num")} height={260}/></Card>
+    </div>
+
+    {ddOverlaySpec && <Card><PlotBox spec={ddOverlaySpec} height={320}/></Card>}
+
+    <Card title="明細表">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabular">
+          <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+            <th className="text-left py-2">標的</th><th className="text-left">類別</th>
+            <th className="text-right">報酬率</th><th className="text-right">波動率</th>
+            <th className="text-right">原始最大回撤</th><th className="text-right">MC P95 回撤</th>
+            <th className="text-right">報酬 / 回撤比</th><th className="text-right">交易數</th></tr></thead>
+          <tbody>{rows.map((r,i)=>
+            <tr key={r.code} className="border-b border-slate-100">
+              <td className="py-1.5 font-medium">
+                <span className="inline-block w-2.5 h-2.5 rounded-sm mr-2" style={{background:COMPARE_PALETTE[i%8]}}></span>
+                {r.code} {r.name}</td>
+              <td className="text-slate-500">{r.category}</td>
+              <td className={"text-right "+retColor(r.m.total_return)}>{fmtPct(r.m.total_return,true)}</td>
+              <td className="text-right">{fmtPct(r.m.volatility)}</td>
+              <td className="text-right text-emerald-700">{fmtPct(r.m.max_drawdown)}</td>
+              <td className="text-right text-emerald-700">{r.p95==null?"（未模擬）":fmtPct(r.p95)}</td>
+              <td className="text-right">{fmtNum(r.ratio)}</td>
+              <td className="text-right">{r.m.num_trades}</td>
+            </tr>)}</tbody>
+        </table>
+      </div>
+      <div className="text-xs text-slate-400 mt-2">報酬／回撤比：以 MC P95 回撤為分母（未模擬者以原始最大回撤代替）。逐檔切換至「③」執行模擬後此表與上方圖表自動更新。</div>
+    </Card>
+  </div>;
 }
 
 /* ---------- app ---------- */
