@@ -269,16 +269,62 @@ function ResultPage({bt, activeCode, setActiveCode}){
   </div>;
 }
 
+/* ---------- MC helpers: treat the selection as one portfolio ---------- */
+function portfolioTradeReturns(bt){
+  // merge every code's trades chronologically; each trade acts on a 1/N
+  // equal-weight slice, so its portfolio-level return is scaled by 1/N
+  const results = Object.values(bt.results);
+  const n = results.length;
+  const all = [];
+  results.forEach(r=>r.trades.forEach(t=>
+    all.push({exit_date:t.exit_date, ret:t.return/n, code:r.code})));
+  all.sort((a,b)=> a.exit_date < b.exit_date ? -1 : 1);
+  return all.map(t=>t.ret);
+}
+function mcTargetLabel(bt, target){
+  if(target==="__pf__"){
+    const n = Object.keys(bt.results).length;
+    return `投資組合（${n} 檔等權重合併）`;
+  }
+  const r = bt.results[target];
+  return r ? `${r.code} ${r.name}` : target;
+}
+function mcTradeReturns(bt, target){
+  if(target==="__pf__") return portfolioTradeReturns(bt);
+  const r = bt.results[target];
+  return r ? r.trades.map(t=>t.return) : [];
+}
+
 /* ---------- page 3: MC settings ---------- */
-function MCSetupPage({bt, activeCode, mcState, setMcState, onRun}){
+function MCSetupPage({bt, mcState, setMcState, onRun}){
   if(!bt) return <Card><div className="text-slate-400 text-sm">請先完成回測。</div></Card>;
-  const r = bt.results[activeCode];
-  if(!r) return <Card><div className="text-slate-400 text-sm">請先於「② 回測結果」選擇標的。</div></Card>;
+  const codes = Object.keys(bt.results);
+  const target = mcState.target;
+  const trades = mcTradeReturns(bt, target);
   const {mode, nSims, job} = mcState;
-  const disabled = r.trades.length < 2;
+  const disabled = trades.length < 2;
   return <div className="grid gap-4 max-w-2xl">
-    <Card title={`蒙地卡羅模擬設定 — ${r.code} ${r.name}（${r.trades.length} 筆交易）`}>
+    <Card title={`蒙地卡羅模擬設定 — ${mcTargetLabel(bt, target)}（${trades.length} 筆交易）`}>
       <div className="grid gap-4">
+        <Field label="模擬對象">
+          <div className="flex flex-wrap gap-3 items-center">
+            <button onClick={()=>setMcState(s=>({...s, target:"__pf__", job:null}))}
+              className={"text-left border rounded-xl px-4 py-2.5 "+(target==="__pf__"?"border-blue-600 ring-2 ring-blue-100 bg-blue-50":"border-slate-300 bg-white hover:border-blue-300")}>
+              <div className="text-sm font-bold">投資組合</div>
+              <div className="text-xs text-slate-500">{codes.length} 檔等權重，全部交易依時間合併</div>
+            </button>
+            <button onClick={()=>setMcState(s=>({...s, target:codes[0], job:null}))}
+              className={"text-left border rounded-xl px-4 py-2.5 "+(target!=="__pf__"?"border-blue-600 ring-2 ring-blue-100 bg-blue-50":"border-slate-300 bg-white hover:border-blue-300")}>
+              <div className="text-sm font-bold">單一標的</div>
+              <div className="text-xs text-slate-500">只模擬其中一檔的交易序列</div>
+            </button>
+            {target!=="__pf__" &&
+              <select className={inputCls+" w-auto"} value={target}
+                onChange={e=>setMcState(s=>({...s, target:e.target.value, job:null}))}>
+                {codes.map(c=><option key={c} value={c}>{c} {bt.results[c].name}</option>)}
+              </select>}
+          </div>
+        </Field>
         <Field label="模式">
           <div className="flex gap-3">
             {[["reshuffle","Reshuffle（打亂順序）","總報酬不變，觀察回撤序列風險"],
@@ -316,10 +362,10 @@ function MCSetupPage({bt, activeCode, mcState, setMcState, onRun}){
 }
 
 /* ---------- page 4: MC results ---------- */
-function MCResultPage({bt, activeCode, mcResults}){
-  const mc = mcResults[activeCode];
+function MCResultPage({bt, mcTarget, mcResults}){
+  const mc = mcResults[mcTarget];
   if(!mc) return <Card><div className="text-slate-400 text-sm">尚未執行蒙地卡羅模擬。</div></Card>;
-  const r = bt.results[activeCode];
+  const r = mcTarget==="__pf__" ? null : bt.results[mcTarget];
   const pct = q => mc.percentiles.find(p=>p.pct===q);
   const med = pct(50).drawdown, p95 = pct(95).drawdown, p99 = pct(99).drawdown;
   const histSpec = {
@@ -342,6 +388,7 @@ function MCResultPage({bt, activeCode, mcResults}){
   };
   const underestimated = mc.underestimated;
   return <div className="grid gap-4">
+    <div className="text-sm text-slate-500">模擬對象：<b className="text-slate-800">{mcTargetLabel(bt, mcTarget)}</b>　模式：{mc.mode==="reshuffle"?"Reshuffle":"Bootstrap"}・{fmtNum(mc.n_sims,0)} 次</div>
     <div className={"rounded-xl border p-4 "+(underestimated?"bg-amber-50 border-amber-300":"bg-emerald-50 border-emerald-300")}>
       <div className="font-bold text-sm mb-1">{underestimated ? "⚠ 風險可能被低估" : "✓ 原始回測的回撤估計尚屬保守"}</div>
       <div className="text-sm">
@@ -351,7 +398,8 @@ function MCResultPage({bt, activeCode, mcResults}){
           ? "——同一組交易換個順序，就有 5% 的情境回撤比原始結果更深，實際交易時應以 95 百分位（或更深）作為風險預算。"
           : "——原始交易順序的回撤已接近或深於多數模擬情境，屬於較保守的估計。"}
         {mc.never_recovered_pct>0 && <span>　另有 <b className="tabular">{fmtPct(mc.never_recovered_pct)}</b> 的模擬至期末仍未回到前高。</span>}
-        <span className="text-slate-500">（日線權益最大回撤為 {fmtPct(r.metrics.max_drawdown)}，含持倉期間的未實現波動，通常較交易序列口徑更深。）</span>
+        {r && <span className="text-slate-500">（日線權益最大回撤為 {fmtPct(r.metrics.max_drawdown)}，含持倉期間的未實現波動，通常較交易序列口徑更深。）</span>}
+        {!r && <span className="text-slate-500">（組合層級：各標的交易依出場日合併、按 1/N 等權重換算為組合損益後模擬。）</span>}
       </div>
     </div>
     <div className="grid lg:grid-cols-2 gap-4">
@@ -388,120 +436,161 @@ function percentileOf(arr, q){
   return a[lo]+(a[hi]-a[lo])*(idx-lo);
 }
 
-/* ---------- page 5: comparison (joint report) ---------- */
+/* ---------- page 5: combined portfolio vs benchmark ---------- */
 const COMPARE_PALETTE = ["#2563eb","#0d9488","#d97706","#7c3aed","#dc2626","#059669","#db2777","#4b5563"];
 
-function metricBarSpec(rows, valueFn, title, tickfmt, barColor){
-  return {
-    data:[{
-      x: rows.map(r=>r.code),
-      y: rows.map(r=>valueFn(r)),
-      type:"bar",
-      marker:{color: rows.map((_,i)=>barColor||COMPARE_PALETTE[i%8])},
-      text: rows.map(r=>{
-        const v=valueFn(r);
-        return tickfmt==="pct" ? fmtPct(v,true) : fmtNum(v);
-      }),
-      hovertext: rows.map(r=>`${r.code} ${r.name}`),
-      hoverinfo:"text+y",
-      textposition:"outside",
-    }],
-    layout:{
-      title:{text:title, font:{size:13}},
-      yaxis:{tickformat: tickfmt==="pct" ? ",.0%" : ",.2f"},
-      xaxis:{type:"category", tickfont:{size:11}},
-      margin:{t:36},
-    }
-  };
+function seriesStats(equity, dates){
+  const n = equity.length;
+  const total = equity[n-1]/equity[0]-1;
+  const days = (new Date(dates[n-1]) - new Date(dates[0]))/864e5;
+  const years = days/365.25;
+  const cagr = years>0 ? Math.pow(equity[n-1]/equity[0], 1/years)-1 : NaN;
+  const rets = []; for(let i=1;i<n;i++) rets.push(equity[i]/equity[i-1]-1);
+  const mean = rets.reduce((a,b)=>a+b,0)/rets.length;
+  const vol = Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length)*Math.sqrt(252);
+  const sharpe = vol>0 ? mean*252/vol : NaN;
+  let peak=-Infinity, mdd=0;
+  for(const v of equity){ if(v>peak)peak=v; const dd=v/peak-1; if(dd<mdd)mdd=dd; }
+  return {total, cagr, vol, sharpe, mdd, rets};
+}
+function olsAlphaBeta(rp, rm){
+  const n = Math.min(rp.length, rm.length);
+  if(n<3) return null;
+  const x=rm.slice(0,n), y=rp.slice(0,n);
+  const xb=x.reduce((a,b)=>a+b,0)/n, yb=y.reduce((a,b)=>a+b,0)/n;
+  let sxx=0, sxy=0;
+  for(let i=0;i<n;i++){ sxx+=(x[i]-xb)*(x[i]-xb); sxy+=(x[i]-xb)*(y[i]-yb); }
+  if(sxx<=0) return null;
+  const beta = sxy/sxx, alpha = yb - beta*xb;
+  return {beta, alphaAnnual: alpha*252};
 }
 
-function ComparePage({bt, mcResults}){
+function PortfolioPage({bt, setup}){
+  const [bench, setBench] = useState(null);
+  useEffect(()=>{
+    if(!bt) return;
+    apiGet(`/api/benchmark?start=${setup.start}&end=${setup.end}`).then(setBench).catch(()=>setBench({dates:[],closes:[]}));
+  },[bt]);
   if(!bt) return <Card><div className="text-slate-400 text-sm">請先完成回測。</div></Card>;
-  const rows = Object.values(bt.results).map(r=>{
-    const mc = mcResults[r.code];
-    const p95 = mc ? mc.percentiles.find(p=>p.pct===95).drawdown : null;
-    const ratio = p95 ? r.metrics.total_return/Math.abs(p95) : (r.metrics.max_drawdown ? r.metrics.total_return/Math.abs(r.metrics.max_drawdown) : null);
-    return {code:r.code, name:r.name, category:r.category, m:r.metrics, p95, ratio, hasMc:!!mc};
-  });
-  const mcRows = rows.filter(r=>r.hasMc);
 
-  // headline insight: best risk-adjusted (ratio) and worst drawdown
-  const ranked = [...rows].filter(r=>r.ratio!=null).sort((a,b)=>b.ratio-a.ratio);
-  const best = ranked[0], worst = [...rows].sort((a,b)=>a.m.max_drawdown-b.m.max_drawdown)[0];
+  const results = Object.values(bt.results);
+  const capital = setup.capital;
+
+  // ---- combine per-code strategy equity into one equal-weight portfolio
+  const dateSet = new Set();
+  results.forEach(r=>r.dates.forEach(d=>dateSet.add(d)));
+  const allDates = [...dateSet].sort();
+  const growth = results.map(r=>{
+    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]/capital]));
+    let last = 1; // before a code's first bar its slice sits in cash (growth 1)
+    return allDates.map(d=>{ if(map.has(d)) last = map.get(d); return last; });
+  });
+  const pf = allDates.map((_,i)=> capital * growth.reduce((a,g)=>a+g[i],0)/results.length);
+  const pfStats = seriesStats(pf, allDates);
+
+  // ---- benchmark aligned to the same dates
+  let benchEq = null, benchStats = null, ab = null;
+  if(bench && bench.dates.length>1){
+    const bmap = new Map(bench.dates.map((d,i)=>[d, bench.closes[i]]));
+    let last = null;
+    const closes = allDates.map(d=>{ if(bmap.has(d)) last=bmap.get(d); return last; });
+    const firstIdx = closes.findIndex(v=>v!=null);
+    if(firstIdx>=0 && firstIdx < allDates.length-1){
+      const base = closes[firstIdx];
+      benchEq = closes.map(v=> v==null ? null : capital*v/base);
+      const validEq = benchEq.filter(v=>v!=null);
+      const validDates = allDates.filter((_,i)=>benchEq[i]!=null);
+      benchStats = seriesStats(validEq, validDates);
+      ab = olsAlphaBeta(pfStats.rets, benchStats.rets);
+    }
+  }
+  const excess = benchStats ? pfStats.total - benchStats.total : null;
+  const beats = excess!=null ? excess>0 : null;
 
   const eqSpec = {
-    data: rows.map((r,i)=>({
-      x: bt.results[r.code].dates, y: bt.results[r.code].equity_curve,
-      type:"scatter", mode:"lines", name:`${r.code} ${r.name}`,
-      line:{color:COMPARE_PALETTE[i%8], width:2},
-    })),
-    layout:{title:{text:"權益曲線比較（同一起始本金）", font:{size:14}}, yaxis:{tickformat:",.0f"},
-      legend:{orientation:"h", y:1.15}}
+    data: [
+      {x:allDates, y:pf, type:"scatter", mode:"lines", name:"組合策略（等權重）",
+       line:{color:"#2563eb", width:2.5}},
+      ...(benchEq ? [{x:allDates, y:benchEq, type:"scatter", mode:"lines",
+        name:"櫃買指數（同額投入）", line:{color:"#64748b", width:2, dash:"dash"}}] : []),
+      ...results.map((r,i)=>({x:r.dates, y:r.equity_curve, type:"scatter", mode:"lines",
+        name:`${r.code} ${r.name}`, line:{color:COMPARE_PALETTE[i%8], width:1}, opacity:0.45})),
+    ],
+    layout:{title:{text:"組合權益曲線 vs 大盤", font:{size:14}}, yaxis:{tickformat:",.0f"},
+      legend:{orientation:"h", y:1.18}}
+  };
+  let peak=-Infinity;
+  const dd = pf.map(v=>{ if(v>peak)peak=v; return v/peak-1; });
+  const ddSpec = {
+    data:[{x:allDates, y:dd, type:"scatter", mode:"lines", fill:"tozeroy",
+      line:{color:"#dc2626", width:1.5}, name:"組合回撤"}],
+    layout:{title:{text:"組合回撤", font:{size:14}}, yaxis:{tickformat:",.0%"}}
   };
 
-  const ddOverlaySpec = mcRows.length ? {
-    data: mcRows.map((r,i)=>({
-      x: mcResults[r.code].drawdowns.map(d=>d*100),
-      type:"histogram", histnorm:"probability", opacity:0.55, nbinsx:30,
-      name:`${r.code} ${r.name}`, marker:{color:COMPARE_PALETTE[i%8]},
-    })),
-    layout:{title:{text:"蒙地卡羅回撤分布疊圖", font:{size:14}}, barmode:"overlay",
-      xaxis:{title:"最大回撤 (%)", ticksuffix:"%"}, yaxis:{tickformat:",.0%"},
-      legend:{orientation:"h", y:1.15}}
-  } : null;
-
   return <div className="grid gap-4">
-    <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm">
-      <div className="font-bold mb-1">共同報告摘要</div>
-      <div>
-        本次共比較 <b>{rows.length}</b> 檔標的。
-        {best && <span>風險調整後表現最佳：<b>{best.code} {best.name}</b>（報酬／回撤比 {fmtNum(best.ratio)}）。</span>}
-        {worst && <span>　原始最大回撤最深：<b>{worst.code} {worst.name}</b>（{fmtPct(worst.m.max_drawdown)}）。</span>}
-        {mcRows.length < rows.length && <span className="text-slate-500">　尚有 {rows.length-mcRows.length} 檔未執行蒙地卡羅模擬，請至「③」逐檔執行以納入完整風險比較。</span>}
-      </div>
+    {beats!=null &&
+      <div className={"rounded-xl border p-4 text-sm "+(beats?"bg-red-50 border-red-200":"bg-emerald-50 border-emerald-200")}>
+        <div className="font-bold mb-1">{beats ? "✓ 組合策略跑贏大盤" : "✗ 組合策略未跑贏大盤"}</div>
+        <div>
+          將所選 <b>{results.length}</b> 檔標的等權重組成一個投資組合策略：期間報酬
+          <b className="tabular"> {fmtPct(pfStats.total,true)}</b>，同期櫃買指數
+          <b className="tabular"> {fmtPct(benchStats.total,true)}</b>，超額報酬
+          <b className={"tabular "+retColor(excess)}> {fmtPct(excess,true)}</b>。
+          {ab && <span>　組合 Beta <b className="tabular">{ab.beta.toFixed(2)}</b>、年化 Alpha <b className="tabular">{fmtPct(ab.alphaAnnual,true)}</b>。</span>}
+        </div>
+      </div>}
+    {beats==null &&
+      <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
+        此區間無櫃買指數資料，無法做大盤比較（僅顯示組合本身績效）。
+      </div>}
+
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+      <Metric label="組合報酬率" value={fmtPct(pfStats.total,true)} cls={retColor(pfStats.total)}/>
+      <Metric label="大盤報酬率" value={benchStats?fmtPct(benchStats.total,true):"-"} cls={benchStats?retColor(benchStats.total):""}/>
+      <Metric label="超額報酬" value={excess!=null?fmtPct(excess,true):"-"} cls={excess!=null?retColor(excess):""}/>
+      <Metric label="年化報酬率" value={fmtPct(pfStats.cagr,true)} cls={retColor(pfStats.cagr)}/>
+      <Metric label="組合波動率" value={fmtPct(pfStats.vol)}/>
+      <Metric label="大盤波動率" value={benchStats?fmtPct(benchStats.vol):"-"}/>
+      <Metric label="夏普比率" value={fmtNum(pfStats.sharpe)}/>
+      <Metric label="組合最大回撤" value={fmtPct(pfStats.mdd)} cls="text-emerald-700"/>
     </div>
 
-    <Card><PlotBox spec={eqSpec} height={360}/></Card>
+    <Card><PlotBox spec={eqSpec} height={380}/></Card>
+    <Card><PlotBox spec={ddSpec} height={220}/></Card>
 
-    <div className="grid md:grid-cols-2 gap-4">
-      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.total_return, "報酬率比較", "pct")} height={260}/></Card>
-      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.volatility, "波動率比較", "pct")} height={260}/></Card>
-      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.max_drawdown, "原始最大回撤比較", "pct", "#047857")} height={260}/></Card>
-      <Card><PlotBox spec={metricBarSpec(rows, r=>r.m.sharpe, "夏普比率比較", "num")} height={260}/></Card>
-    </div>
-
-    {ddOverlaySpec && <Card><PlotBox spec={ddOverlaySpec} height={320}/></Card>}
-
-    <Card title="明細表">
+    <Card title={`成分標的（等權重，各佔 ${fmtPct(1/results.length)}）`}>
       <div className="overflow-x-auto">
         <table className="w-full text-sm tabular">
           <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
             <th className="text-left py-2">標的</th><th className="text-left">類別</th>
-            <th className="text-right">報酬率</th><th className="text-right">波動率</th>
-            <th className="text-right">原始最大回撤</th><th className="text-right">MC P95 回撤</th>
-            <th className="text-right">報酬 / 回撤比</th><th className="text-right">交易數</th></tr></thead>
-          <tbody>{rows.map((r,i)=>
-            <tr key={r.code} className="border-b border-slate-100">
+            <th className="text-right">個別報酬率</th><th className="text-right">個別波動率</th>
+            <th className="text-right">個別最大回撤</th><th className="text-right">對組合報酬貢獻</th>
+            <th className="text-right">交易數</th></tr></thead>
+          <tbody>{results.map((r,i)=>{
+            const contrib = r.metrics.total_return / results.length;
+            return <tr key={r.code} className="border-b border-slate-100">
               <td className="py-1.5 font-medium">
                 <span className="inline-block w-2.5 h-2.5 rounded-sm mr-2" style={{background:COMPARE_PALETTE[i%8]}}></span>
                 {r.code} {r.name}</td>
               <td className="text-slate-500">{r.category}</td>
-              <td className={"text-right "+retColor(r.m.total_return)}>{fmtPct(r.m.total_return,true)}</td>
-              <td className="text-right">{fmtPct(r.m.volatility)}</td>
-              <td className="text-right text-emerald-700">{fmtPct(r.m.max_drawdown)}</td>
-              <td className="text-right text-emerald-700">{r.p95==null?"（未模擬）":fmtPct(r.p95)}</td>
-              <td className="text-right">{fmtNum(r.ratio)}</td>
-              <td className="text-right">{r.m.num_trades}</td>
-            </tr>)}</tbody>
+              <td className={"text-right "+retColor(r.metrics.total_return)}>{fmtPct(r.metrics.total_return,true)}</td>
+              <td className="text-right">{fmtPct(r.metrics.volatility)}</td>
+              <td className="text-right text-emerald-700">{fmtPct(r.metrics.max_drawdown)}</td>
+              <td className={"text-right "+retColor(contrib)}>{fmtPct(contrib,true)}</td>
+              <td className="text-right">{r.metrics.num_trades}</td>
+            </tr>;})}</tbody>
         </table>
       </div>
-      <div className="text-xs text-slate-400 mt-2">報酬／回撤比：以 MC P95 回撤為分母（未模擬者以原始最大回撤代替）。逐檔切換至「③」執行模擬後此表與上方圖表自動更新。</div>
+      <div className="text-xs text-slate-400 mt-2">
+        組合方式：起始本金平均分配給各標的，各自執行策略，期間不再平衡；
+        某標的尚無資料的日期，其資金視為現金。Beta／Alpha 以組合日報酬對櫃買指數日報酬迴歸估計。紅漲綠跌。
+      </div>
     </Card>
   </div>;
 }
 
 /* ---------- app ---------- */
-const PAGES = ["① 設定","② 回測結果","③ 蒙地卡羅設定","④ 蒙地卡羅結果","⑤ 多標的比較"];
+const PAGES = ["① 設定","② 回測結果","③ 蒙地卡羅設定","④ 蒙地卡羅結果","⑤ 組合績效 vs 大盤"];
 function App(){
   const [page, setPage] = useState(0);
   const [setup, setSetup] = useState({
@@ -513,7 +602,7 @@ function App(){
   const [running, setRunning] = useState(false);
   const [bt, setBt] = useState(null);
   const [activeCode, setActiveCode] = useState("");
-  const [mcState, setMcState] = useState({mode:"reshuffle", nSims:1000, job:null});
+  const [mcState, setMcState] = useState({mode:"reshuffle", nSims:1000, job:null, target:"__pf__"});
   const [mcResults, setMcResults] = useState({});
 
   const runBacktest = async ()=>{
@@ -523,23 +612,25 @@ function App(){
         strategy:setup.strategy, params:setup.params, capital:setup.capital,
         risk_pct:setup.riskPct, leverage:setup.leverage};
       const data = await apiPost("/api/backtest", body);
-      setBt(data); setActiveCode(Object.keys(data.results)[0]); setMcResults({});
-      setMcState(s=>({...s, job:null}));
+      const codes = Object.keys(data.results);
+      setBt(data); setActiveCode(codes[0]); setMcResults({});
+      // default MC target: the combined portfolio when multiple codes, else the single code
+      setMcState(s=>({...s, job:null, target: codes.length>1 ? "__pf__" : codes[0]}));
       setPage(1);
     }catch(e){ setSetup(s=>({...s, error:String(e.message||e)})); }
     setRunning(false);
   };
   const runMC = async ()=>{
-    const r = bt.results[activeCode];
+    const target = mcState.target;
     const {job_id} = await apiPost("/api/montecarlo", {
-      trade_returns:r.trades.map(t=>t.return), n_sims:mcState.nSims,
+      trade_returns: mcTradeReturns(bt, target), n_sims:mcState.nSims,
       mode:mcState.mode, capital:setup.capital});
     setMcState(s=>({...s, job:{status:"running", progress:0}}));
     const poll = async ()=>{
       const j = await apiGet("/api/montecarlo/"+job_id);
       setMcState(s=>({...s, job:j}));
       if(j.status==="running") setTimeout(poll, 250);
-      else if(j.status==="done"){ setMcResults(m=>({...m, [activeCode]:j.result})); setPage(3); }
+      else if(j.status==="done"){ setMcResults(m=>({...m, [target]:j.result})); setPage(3); }
     };
     poll();
   };
@@ -558,9 +649,9 @@ function App(){
     </nav>
     {page===0 && <SetupPage state={setup} setState={setSetup} onRun={runBacktest} running={running}/>}
     {page===1 && <ResultPage bt={bt} activeCode={activeCode} setActiveCode={setActiveCode}/>}
-    {page===2 && <MCSetupPage bt={bt} activeCode={activeCode} mcState={mcState} setMcState={setMcState} onRun={runMC}/>}
-    {page===3 && <MCResultPage bt={bt} activeCode={activeCode} mcResults={mcResults}/>}
-    {page===4 && <ComparePage bt={bt} mcResults={mcResults}/>}
+    {page===2 && <MCSetupPage bt={bt} mcState={mcState} setMcState={setMcState} onRun={runMC}/>}
+    {page===3 && <MCResultPage bt={bt} mcTarget={mcState.target} mcResults={mcResults}/>}
+    {page===4 && <PortfolioPage bt={bt} setup={setup}/>}
   </div>;
 }
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);

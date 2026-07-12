@@ -46,6 +46,16 @@ def coverage():
     return tpex_data.coverage()
 
 
+@app.get("/api/benchmark")
+def benchmark(start: str, end: str):
+    """櫃買指數 daily closes for the benchmark comparison."""
+    s = tpex_data.load_benchmark(start, end)
+    return {
+        "dates": [str(d.date()) for d in s.index],
+        "closes": [float(v) for v in s.values],
+    }
+
+
 # ---------------------------------------------------------------- backtest
 
 class BacktestRequest(BaseModel):
