@@ -5,11 +5,14 @@ Run with:
 """
 from __future__ import annotations
 
+import io
+import math
 import threading
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+import pandas as pd
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,6 +20,17 @@ from pydantic import BaseModel, Field
 from . import backtest as bt
 from . import monte_carlo as mc
 from . import tpex_data
+
+def _json_safe(o):
+    """Replace non-finite floats (NaN/inf) with None so responses stay valid JSON."""
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_json_safe(v) for v in o]
+    if isinstance(o, float) and not math.isfinite(o):
+        return None
+    return o
+
 
 app = FastAPI(title="TPEx Monte-Carlo Backtest API")
 app.add_middleware(
@@ -54,6 +68,73 @@ def benchmark(start: str, end: str):
         "dates": [str(d.date()) for d in s.index],
         "closes": [float(v) for v in s.values],
     }
+
+
+# ---------------------------------------------------------------- custom data upload
+
+_DATE_COLS = {"date", "日期", "交易日期", "time", "年月日"}
+_CLOSE_COLS = {"close", "adj close", "adj_close", "adjclose", "收盤", "收盤價", "收盤價(元)", "price"}
+
+
+def _parse_price_csv(content: bytes) -> pd.DataFrame:
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "cp950", "big5"):
+        try:
+            text = content.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError("無法解讀檔案編碼（支援 UTF-8 / Big5）")
+    df = pd.read_csv(io.StringIO(text))
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    date_col = next((cols[k] for k in cols if k in _DATE_COLS), None)
+    close_col = next((cols[k] for k in cols if k in _CLOSE_COLS), None)
+    if date_col is None or close_col is None:
+        raise ValueError(
+            f"找不到日期／收盤價欄位。偵測到的欄位：{list(df.columns)}；"
+            "日期欄需為 date/日期，收盤欄需為 close/Adj Close/收盤/收盤價 之一"
+        )
+
+    def norm_date(s: str) -> str | None:
+        s = str(s).strip().replace("/", "-").replace(".", "-")
+        parts = s.split("-")
+        if len(parts) == 3 and parts[0].isdigit():
+            y = int(parts[0])
+            if y < 1911:  # 民國年
+                y += 1911
+            try:
+                return f"{y:04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+            except ValueError:
+                return None
+        return None
+
+    out = pd.DataFrame(
+        {
+            "date": df[date_col].map(norm_date),
+            "close": pd.to_numeric(
+                df[close_col].astype(str).str.replace(",", "").str.strip(), errors="coerce"
+            ),
+        }
+    ).dropna()
+    out = out[out["close"] > 0].drop_duplicates(subset="date").sort_values("date")
+    if len(out) < 5:
+        raise ValueError(f"有效資料列不足（僅 {len(out)} 列），至少需要 5 個交易日")
+    return out
+
+
+@app.post("/api/upload")
+async def upload_csv(file: UploadFile = File(...), name: str = Form(default="")):
+    content = await file.read()
+    if len(content) > 10_000_000:
+        raise HTTPException(400, "檔案過大（上限 10 MB）")
+    try:
+        df = _parse_price_csv(content)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ds_name = (name or (file.filename or "custom").rsplit(".", 1)[0]).strip()[:60]
+    info = tpex_data.add_custom_dataset(ds_name, df)
+    return info
 
 
 # ---------------------------------------------------------------- backtest
@@ -96,7 +177,7 @@ def run_backtest(req: BacktestRequest):
         results[code] = result
     if not results:
         raise HTTPException(400, detail={"message": "所有標的回測失敗", "errors": errors})
-    return {"results": results, "errors": errors}
+    return _json_safe({"results": results, "errors": errors})
 
 
 # ---------------------------------------------------------------- monte carlo (async job)
@@ -123,7 +204,7 @@ def _run_job(job_id: str, req: MonteCarloRequest) -> None:
             capital=req.capital, progress_cb=cb,
         )
         with JOBS_LOCK:
-            JOBS[job_id].update(status="done", progress=1.0, result=result)
+            JOBS[job_id].update(status="done", progress=1.0, result=_json_safe(result))
     except Exception as exc:  # noqa: BLE001
         with JOBS_LOCK:
             JOBS[job_id].update(status="error", error=str(exc))

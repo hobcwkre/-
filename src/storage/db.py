@@ -46,6 +46,27 @@ CREATE TABLE IF NOT EXISTS crawl_state (
     market TEXT PRIMARY KEY,
     last_date TEXT
 );
+
+-- months already fetched on demand per code (warrants), to avoid refetching
+-- months where the security legitimately had zero trades
+CREATE TABLE IF NOT EXISTS fetched_months (
+    code TEXT NOT NULL,
+    month TEXT NOT NULL,
+    PRIMARY KEY (code, month)
+);
+
+-- user-uploaded price datasets
+CREATE TABLE IF NOT EXISTS custom_datasets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS custom_quotes (
+    dataset_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    close REAL NOT NULL,
+    PRIMARY KEY (dataset_id, date)
+);
 """
 
 
@@ -166,6 +187,69 @@ def covered_date_range(conn: sqlite3.Connection, market: str) -> tuple[str | Non
         "SELECT MIN(date), MAX(date) FROM daily_quotes WHERE market=?", (market,)
     ).fetchone()
     return (row[0], row[1]) if row else (None, None)
+
+
+def month_fetched(conn: sqlite3.Connection, code: str, month: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM fetched_months WHERE code=? AND month=?", (code, month)
+    ).fetchone() is not None
+
+
+def mark_month_fetched(conn: sqlite3.Connection, code: str, month: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO fetched_months (code, month) VALUES (?, ?)", (code, month)
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------- custom datasets
+
+def add_custom_dataset(conn: sqlite3.Connection, name: str, df: pd.DataFrame) -> int:
+    """df columns: date (ISO str), close. Replaces an existing dataset of the same name."""
+    from datetime import datetime
+
+    row = conn.execute("SELECT id FROM custom_datasets WHERE name=?", (name,)).fetchone()
+    if row:
+        ds_id = row[0]
+        conn.execute("DELETE FROM custom_quotes WHERE dataset_id=?", (ds_id,))
+    else:
+        cur = conn.execute(
+            "INSERT INTO custom_datasets (name, created) VALUES (?, ?)",
+            (name, datetime.now().isoformat(timespec="seconds")),
+        )
+        ds_id = cur.lastrowid
+    conn.executemany(
+        "INSERT OR REPLACE INTO custom_quotes (dataset_id, date, close) VALUES (?, ?, ?)",
+        [(ds_id, d, float(c)) for d, c in zip(df["date"], df["close"])],
+    )
+    conn.commit()
+    return ds_id
+
+
+def list_custom_datasets(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """SELECT d.id, d.name, d.created, COUNT(q.date) AS rows,
+                  MIN(q.date) AS start, MAX(q.date) AS end
+           FROM custom_datasets d LEFT JOIN custom_quotes q ON q.dataset_id = d.id
+           GROUP BY d.id ORDER BY d.id""",
+        conn,
+    )
+
+
+def load_custom_series(
+    conn: sqlite3.Connection, ds_id: int, start: str | None = None, end: str | None = None
+) -> pd.DataFrame:
+    query = "SELECT date, close FROM custom_quotes WHERE dataset_id=?"
+    params: list = [ds_id]
+    if start:
+        query += " AND date >= ?"
+        params.append(start)
+    if end:
+        query += " AND date <= ?"
+        params.append(end)
+    query += " ORDER BY date"
+    df = pd.read_sql_query(query, conn, params=params, parse_dates=["date"])
+    return df.set_index("date")
 
 
 def upsert_index_quotes(conn: sqlite3.Connection, df: pd.DataFrame) -> None:

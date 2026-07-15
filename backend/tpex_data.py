@@ -1,11 +1,18 @@
 """Security lists (cascading dropdown data) and price loading for the MC web app.
 
-All data is strictly TPEx (上櫃 + 興櫃) — the SQLite universe is built from
-TPEx-only sources (see src/crawler), so no TWSE-listed security can appear.
+Scope: 上櫃 only — 股票 / ETF(含債券ETF) / 權證, plus user-uploaded custom
+datasets (自訂資料). The SQLite universe is built from TPEx-only sources
+(see src/crawler), so no TWSE-listed security can appear.
+
+Warrants are NOT bulk-synced (≈9k live codes would balloon the DB); their
+price history is fetched per-code on demand via afterTrading/tradingStock
+(one month per request) and cached into daily_quotes + fetched_months.
 """
 from __future__ import annotations
 
 import sys
+import threading
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.crawler.client import TpexClient  # noqa: E402
+from src.crawler.daily_quotes import fetch_stock_month  # noqa: E402
+from src.crawler.market_index import month_starts  # noqa: E402
 from src.storage import db  # noqa: E402
 
 # TPEx official industry classification codes (as used by the TPEx quote pages)
@@ -28,9 +38,19 @@ INDUSTRY_NAMES = {
     "36": "數位雲端", "37": "運動休閒", "38": "居家生活", "80": "管理股票",
 }
 
-# market-category tier (first dropdown); 股票 spans both TPEx boards
-STOCK_CATS = {"上櫃", "興櫃"}
-CATEGORY_TIERS = ["股票", "ETF", "債券ETF", "ETN"]
+CUSTOM_CATEGORY = "自訂資料"
+CUSTOM_PREFIX = "U"  # custom dataset codes look like U1, U2, ...
+
+_client_lock = threading.Lock()
+_client: TpexClient | None = None
+
+
+def _get_client() -> TpexClient:
+    global _client
+    with _client_lock:
+        if _client is None:
+            _client = TpexClient(delay=0.15)
+        return _client
 
 
 def _conn():
@@ -40,35 +60,56 @@ def _conn():
 
 
 def list_categories() -> list[str]:
-    companies = db.load_companies(_conn())
+    conn = _conn()
+    companies = db.load_companies(conn)
     present = set(companies["category"])
     tiers = []
-    if present & STOCK_CATS:
+    if "上櫃" in present:
         tiers.append("股票")
-    for cat in ["ETF", "債券ETF", "ETN"]:
-        if cat in present:
-            tiers.append(cat)
+    if present & {"ETF", "債券ETF"}:
+        tiers.append("ETF")
+    if "權證" in present:
+        tiers.append("權證")
+    if len(db.list_custom_datasets(conn)):
+        tiers.append(CUSTOM_CATEGORY)
     return tiers
 
 
 def list_industries(category: str) -> list[dict]:
-    """Industry tier — only meaningful for 股票."""
+    """Industry tier — only meaningful for 股票 (上櫃)."""
     if category != "股票":
         return []
     companies = db.load_companies(_conn())
-    stocks = companies[companies["category"].isin(STOCK_CATS)]
+    stocks = companies[companies["category"] == "上櫃"]
     codes = sorted({c for c in stocks["industry_code"] if c and c in INDUSTRY_NAMES})
     return [{"code": c, "name": INDUSTRY_NAMES[c]} for c in codes]
 
 
 def list_securities(category: str, industry: str | None = None) -> list[dict]:
-    companies = db.load_companies(_conn())
+    conn = _conn()
+    if category == CUSTOM_CATEGORY:
+        ds = db.list_custom_datasets(conn)
+        return [
+            {
+                "code": f"{CUSTOM_PREFIX}{r['id']}",
+                "name": r["name"],
+                "market": "custom",
+                "category": CUSTOM_CATEGORY,
+                "board": "自訂",
+            }
+            for _, r in ds.iterrows()
+        ]
+    companies = db.load_companies(conn)
     if category == "股票":
-        subset = companies[companies["category"].isin(STOCK_CATS)]
+        subset = companies[companies["category"] == "上櫃"]
         if industry:
             subset = subset[subset["industry_code"] == industry]
+    elif category == "ETF":
+        subset = companies[companies["category"].isin(["ETF", "債券ETF"])]
+    elif category == "權證":
+        subset = companies[companies["category"] == "權證"]
     else:
-        subset = companies[companies["category"] == category]
+        subset = companies.iloc[0:0]
     subset = subset.sort_values("code")
     return [
         {
@@ -76,14 +117,61 @@ def list_securities(category: str, industry: str | None = None) -> list[dict]:
             "name": r["name"],
             "market": r["market"],
             "category": r["category"],
-            "board": "上櫃" if r["market"] == "otc" else "興櫃",
+            "board": "上櫃",
         }
         for _, r in subset.iterrows()
     ]
 
 
+def security_info(code: str) -> dict | None:
+    conn = _conn()
+    if code.startswith(CUSTOM_PREFIX) and code[len(CUSTOM_PREFIX):].isdigit():
+        ds = db.list_custom_datasets(conn)
+        hit = ds[ds["id"] == int(code[len(CUSTOM_PREFIX):])]
+        if not hit.empty:
+            return {
+                "code": code, "name": hit.iloc[0]["name"],
+                "market": "custom", "category": CUSTOM_CATEGORY,
+            }
+        return None
+    companies = db.load_companies(conn)
+    hit = companies[companies["code"] == code]
+    if hit.empty:
+        return None
+    # this app is 上櫃-scoped: prefer the otc row when a code exists on both boards
+    otc = hit[hit["market"] == "otc"]
+    r = (otc if not otc.empty else hit).iloc[0]
+    return {"code": r["code"], "name": r["name"], "market": r["market"], "category": r["category"]}
+
+
+def _ensure_on_demand(code: str, start: str, end: str) -> None:
+    """Fetch missing months of a warrant's history from TPEx and cache them."""
+    conn = _conn()
+    s, e = date.fromisoformat(start), date.fromisoformat(end)
+    current_month = date.today().strftime("%Y-%m")
+    client = _get_client()
+    for m in month_starts(s, e):
+        key = m.strftime("%Y-%m")
+        if key != current_month and db.month_fetched(conn, code, key):
+            continue
+        try:
+            df = fetch_stock_month(client, code, m)
+        except Exception:  # noqa: BLE001 - a failed month just stays uncached
+            continue
+        if not df.empty:
+            db.upsert_quotes(conn, df)
+        db.mark_month_fetched(conn, code, key)
+
+
 def load_prices(code: str, market: str, start: str, end: str) -> pd.DataFrame:
-    return db.load_price_series(_conn(), code, market, start, end)
+    conn = _conn()
+    if market == "custom":
+        ds_id = int(code[len(CUSTOM_PREFIX):])
+        return db.load_custom_series(conn, ds_id, start, end)
+    info = security_info(code)
+    if info and info["category"] == "權證":
+        _ensure_on_demand(code, start, end)
+    return db.load_price_series(conn, code, market, start, end)
 
 
 def load_benchmark(start: str, end: str) -> pd.Series:
@@ -93,14 +181,16 @@ def load_benchmark(start: str, end: str) -> pd.Series:
 def coverage() -> dict:
     conn = _conn()
     lo_otc, hi_otc = db.covered_date_range(conn, "otc")
-    lo_esb, hi_esb = db.covered_date_range(conn, "esb")
-    return {"otc": [lo_otc, hi_otc], "esb": [lo_esb, hi_esb]}
+    return {"otc": [lo_otc, hi_otc]}
 
 
-def security_info(code: str) -> dict | None:
-    companies = db.load_companies(_conn())
-    hit = companies[companies["code"] == code]
-    if hit.empty:
-        return None
-    r = hit.iloc[0]
-    return {"code": r["code"], "name": r["name"], "market": r["market"], "category": r["category"]}
+def add_custom_dataset(name: str, df: pd.DataFrame) -> dict:
+    conn = _conn()
+    ds_id = db.add_custom_dataset(conn, name, df)
+    return {
+        "code": f"{CUSTOM_PREFIX}{ds_id}",
+        "name": name,
+        "rows": len(df),
+        "start": df["date"].min(),
+        "end": df["date"].max(),
+    }

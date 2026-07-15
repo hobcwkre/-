@@ -4,9 +4,10 @@ Both endpoints below return every listed security for a single date in one
 call, which is far cheaper than querying stock-by-stock:
 
   OTC  : POST /www/zh-tw/afterTrading/otc   body: date, type=EW, id, response=json
-         type=EW = "所有證券(不含權證、牛熊證)" (all securities excl. warrants/bull-bear
-         certs). Still includes bond ETFs etc; caller should filter to the
-         known company-code universe.
+         type=EW = "所有證券(不含權證、牛熊證)". Warrants are deliberately NOT
+         bulk-synced: ~9k live warrants would balloon the DB. They are fetched
+         per-code on demand via fetch_stock_month (afterTrading/tradingStock,
+         one whole month per request) and cached into daily_quotes.
 
   ESB  : POST /www/zh-tw/emerging/des010    body: date, id, response=json
          "日行情表(電腦議價點選成交)" - the standard computer-matched quote board,
@@ -108,3 +109,45 @@ def _parse_esb(payload: dict, d: date) -> pd.DataFrame:
 
 
 FETCHERS = {"otc": fetch_otc_daily, "esb": fetch_esb_daily}
+
+
+def _roc_to_iso(s: str) -> str:
+    y, m, dd = s.strip().split("/")
+    return f"{int(y) + 1911:04d}-{int(m):02d}-{int(dd):02d}"
+
+
+def fetch_stock_month(client: TpexClient, code: str, d: date) -> pd.DataFrame:
+    """One security's daily rows for the month containing `d` (個股日成交資訊).
+
+    Works for any 上櫃-traded code incl. warrants. Row layout:
+      [日期(民國), 成交張數, 成交仟元, 開盤, 最高, 最低, 收盤, 漲跌, 筆數]
+    """
+    body = {"code": code, "date": to_query_date(d.replace(day=1)), "id": "", "response": "json"}
+    payload = client.post_query("afterTrading/tradingStock", body)
+    cols = [
+        "code", "market", "date", "open", "high", "low", "close",
+        "avg_price", "volume", "amount", "transactions", "change",
+    ]
+    tables = payload.get("tables") or []
+    rows = tables[0].get("data") if tables else []
+    out = []
+    for r in rows or []:
+        lots = _num(r[1])
+        out.append(
+            {
+                "code": code,
+                "market": "otc",
+                "date": _roc_to_iso(r[0]),
+                "open": _num(r[3]),
+                "high": _num(r[4]),
+                "low": _num(r[5]),
+                "close": _num(r[6]),
+                "avg_price": None,
+                "volume": lots * 1000 if lots is not None else None,
+                "amount": (_num(r[2]) or 0) * 1000 or None,
+                "transactions": _num(r[8]),
+                "change": _num(r[7]),
+            }
+        )
+    df = pd.DataFrame(out, columns=cols)
+    return df.dropna(subset=["close"])

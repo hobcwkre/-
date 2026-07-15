@@ -88,13 +88,63 @@ function RegressionTable({reg}){
   </div>;
 }
 
+/* ---------- upload custom data ---------- */
+function UploadCard({onUploaded}){
+  const fileRef = useRef(null);
+  const [dsName, setDsName] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const doUpload = async ()=>{
+    const f = fileRef.current && fileRef.current.files[0];
+    if(!f){ setMsg({err:"請先選擇 CSV 檔案"}); return; }
+    setBusy(true); setMsg(null);
+    try{
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("name", dsName);
+      const r = await fetch(API+"/api/upload", {method:"POST", body:fd});
+      const j = await r.json();
+      if(!r.ok) throw new Error(typeof j.detail==="string" ? j.detail : JSON.stringify(j.detail||j));
+      setMsg({ok:`已上傳「${j.name}」：${j.rows} 個交易日（${j.start} ~ ${j.end}），已加入「自訂資料」類別（代號 ${j.code}）。`});
+      setDsName(""); fileRef.current.value="";
+      onUploaded(j);
+    }catch(e){ setMsg({err:String(e.message||e)}); }
+    setBusy(false);
+  };
+  return <Card title="上傳自己的資料（CSV）">
+    <div className="grid md:grid-cols-3 gap-3 items-end">
+      <Field label="CSV 檔案（需含日期與收盤價欄位）">
+        <input type="file" accept=".csv,text/csv" ref={fileRef}
+          className="text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-slate-200 file:px-4 file:py-2 file:text-sm file:font-medium hover:file:bg-slate-300"/>
+      </Field>
+      <Field label="名稱（留空則用檔名）">
+        <input type="text" className={inputCls} value={dsName} maxLength="60"
+          placeholder="例：我的自組指數" onChange={e=>setDsName(e.target.value)}/>
+      </Field>
+      <button onClick={doUpload} disabled={busy}
+        className="bg-slate-700 hover:bg-slate-800 disabled:bg-slate-300 text-white rounded-lg px-4 py-2 text-sm font-bold">
+        {busy?"上傳中...":"上傳"}
+      </button>
+    </div>
+    {msg && msg.ok && <div className="text-sm text-emerald-700 mt-3">{msg.ok}</div>}
+    {msg && msg.err && <div className="text-sm text-red-600 mt-3">{msg.err}</div>}
+    <div className="text-xs text-slate-400 mt-3">
+      欄位名稱支援：日期＝date／日期／交易日期（西元或民國年皆可）；收盤＝close／Adj Close／收盤／收盤價。
+      編碼支援 UTF-8 與 Big5；同名資料集會被覆蓋。上傳後可與上櫃股票、ETF、權證混搭回測。
+    </div>
+  </Card>;
+}
+
 /* ---------- page 1: setup ---------- */
 function SetupPage({state, setState, onRun, running}){
   const {categories, industries, securities, category, industry, secCode, chips,
          start, end, strategy, params, capital, riskPct, leverage, error} = state;
   const set = patch => setState(s=>({...s, ...patch}));
 
-  useEffect(()=>{ apiGet("/api/categories").then(d=>set({categories:d.categories, category:d.categories[0]||""})); },[]);
+  useEffect(()=>{ apiGet("/api/categories").then(d=>set({
+    categories:d.categories,
+    category: d.categories.includes(category) ? category : (d.categories[0]||"")
+  })); },[state.reloadCats||0]);
   useEffect(()=>{
     if(!category) return;
     if(category==="股票"){ apiGet("/api/industries?category=股票").then(d=>set({industries:d.industries, industry:""})); }
@@ -111,7 +161,7 @@ function SetupPage({state, setState, onRun, running}){
     if(sec && !chips.some(c=>c.code===sec.code)) set({chips:[...chips, sec]});
   };
   return <div className="grid gap-4">
-    <Card title="標的選擇（僅上櫃／興櫃）">
+    <Card title="標的選擇（上櫃：股票／ETF／權證，另可上傳自訂資料）">
       <div className="grid md:grid-cols-4 gap-3 items-end">
         <Field label="1. 市場類別">
           <select className={inputCls} value={category} onChange={e=>set({category:e.target.value})}>
@@ -138,12 +188,15 @@ function SetupPage({state, setState, onRun, running}){
         {chips.map(c=>
           <span key={c.code} className="inline-flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-full pl-3 pr-1 py-1 text-sm">
             <span className="font-medium">{c.code} {c.name}</span>
-            <span className="text-xs text-slate-500">{c.board}{c.category!=="上櫃"&&c.category!=="興櫃" ? "・"+c.category : ""}</span>
+            <span className="text-xs text-slate-500">{c.category==="自訂資料" ? "自訂" : c.board+(c.category!=="上櫃" ? "・"+c.category : "")}</span>
             <button className="w-6 h-6 rounded-full hover:bg-slate-200 text-slate-500"
                     onClick={()=>set({chips:chips.filter(x=>x.code!==c.code)})}>✕</button>
           </span>)}
       </div>
     </Card>
+    <UploadCard onUploaded={info=>{
+      set({reloadCats:(state.reloadCats||0)+1, category:"自訂資料"});
+    }}/>
     <Card title="回測參數">
       <div className="grid md:grid-cols-3 lg:grid-cols-6 gap-3">
         <Field label="開始日期"><input type="date" className={inputCls} value={start} onChange={e=>set({start:e.target.value})}/></Field>
@@ -453,6 +506,60 @@ function seriesStats(equity, dates){
   for(const v of equity){ if(v>peak)peak=v; const dd=v/peak-1; if(dd<mdd)mdd=dd; }
   return {total, cagr, vol, sharpe, mdd, rets};
 }
+function skewKurt(rets){
+  const n = rets.length;
+  if(n < 4) return {skew:NaN, kurt:NaN};
+  const mean = rets.reduce((a,b)=>a+b,0)/n;
+  let m2=0,m3=0,m4=0;
+  for(const r of rets){ const d=r-mean; m2+=d*d; m3+=d*d*d; m4+=d*d*d*d; }
+  m2/=n; m3/=n; m4/=n;
+  return {skew: m3/Math.pow(m2,1.5), kurt: m4/(m2*m2)};
+}
+function correlationOf(a, b){
+  const n = Math.min(a.length, b.length);
+  if(n<3) return NaN;
+  const am=a.slice(0,n).reduce((x,y)=>x+y,0)/n, bm=b.slice(0,n).reduce((x,y)=>x+y,0)/n;
+  let saa=0, sbb=0, sab=0;
+  for(let i=0;i<n;i++){ saa+=(a[i]-am)**2; sbb+=(b[i]-bm)**2; sab+=(a[i]-am)*(b[i]-bm); }
+  return (saa>0&&sbb>0) ? sab/Math.sqrt(saa*sbb) : NaN;
+}
+function drawdownEpisodes(equity, dates, topN=5){
+  // TEJ-style episode table: 回撤起始日(前高)、谷底日、虧損回復日、深度、落水期間
+  const eps=[];
+  let peakIdx=0, troughIdx=0, inDD=false;
+  for(let i=1;i<equity.length;i++){
+    if(equity[i] >= equity[peakIdx]){
+      if(inDD){
+        eps.push({startIdx:peakIdx, troughIdx, recoverIdx:i,
+          depth: equity[troughIdx]/equity[peakIdx]-1});
+        inDD=false;
+      }
+      peakIdx=i;
+    }else{
+      if(!inDD){ inDD=true; troughIdx=i; }
+      else if(equity[i] < equity[troughIdx]) troughIdx=i;
+    }
+  }
+  if(inDD) eps.push({startIdx:peakIdx, troughIdx, recoverIdx:null,
+    depth: equity[troughIdx]/equity[peakIdx]-1});
+  eps.sort((a,b)=>a.depth-b.depth);
+  return eps.slice(0,topN).map(e=>({
+    start: dates[e.startIdx], trough: dates[e.troughIdx],
+    recover: e.recoverIdx==null? null : dates[e.recoverIdx],
+    depth: e.depth,
+    downDays: e.troughIdx - e.startIdx,
+    recoverDays: e.recoverIdx==null? null : e.recoverIdx - e.troughIdx,
+  }));
+}
+function annualReturns(equity, dates){
+  const byYear = {};
+  dates.forEach((d,i)=>{ const y=d.slice(0,4); if(!(y in byYear)) byYear[y]={first:i}; byYear[y].last=i; });
+  const years = Object.keys(byYear).sort();
+  return years.map((y,k)=>{
+    const prev = k>0 ? byYear[years[k-1]].last : byYear[y].first;
+    return {year:y, ret: equity[byYear[y].last]/equity[prev]-1};
+  });
+}
 function olsAlphaBeta(rp, rm){
   const n = Math.min(rp.length, rm.length);
   if(n<3) return null;
@@ -467,6 +574,7 @@ function olsAlphaBeta(rp, rm){
 
 function PortfolioPage({bt, setup}){
   const [bench, setBench] = useState(null);
+  const [rf, setRf] = useState(1.6);  // 無風險利率（年%，預設近似一年期定存）
   useEffect(()=>{
     if(!bt) return;
     apiGet(`/api/benchmark?start=${setup.start}&end=${setup.end}`).then(setBench).catch(()=>setBench({dates:[],closes:[]}));
@@ -489,7 +597,7 @@ function PortfolioPage({bt, setup}){
   const pfStats = seriesStats(pf, allDates);
 
   // ---- benchmark aligned to the same dates
-  let benchEq = null, benchStats = null, ab = null;
+  let benchEq = null, benchStats = null, ab = null, benchAnnual = null;
   if(bench && bench.dates.length>1){
     const bmap = new Map(bench.dates.map((d,i)=>[d, bench.closes[i]]));
     let last = null;
@@ -502,10 +610,34 @@ function PortfolioPage({bt, setup}){
       const validDates = allDates.filter((_,i)=>benchEq[i]!=null);
       benchStats = seriesStats(validEq, validDates);
       ab = olsAlphaBeta(pfStats.rets, benchStats.rets);
+      benchAnnual = annualReturns(validEq, validDates);
     }
   }
   const excess = benchStats ? pfStats.total - benchStats.total : null;
   const beats = excess!=null ? excess>0 : null;
+
+  // ---- TEJ-style extended risk metrics
+  const rfA = rf/100;
+  const rets = pfStats.rets;
+  const annArith = rets.reduce((a,b)=>a+b,0)/rets.length*252;
+  const {skew, kurt} = skewKurt(rets);
+  const corr = benchStats ? correlationOf(rets, benchStats.rets) : NaN;
+  const downsideDev = Math.sqrt(rets.reduce((a,b)=>a+Math.min(b,0)**2,0)/rets.length)*Math.sqrt(252);
+  const sharpeRf = pfStats.vol>0 ? (annArith-rfA)/pfStats.vol : NaN;
+  const sortino = downsideDev>0 ? (annArith-rfA)/downsideDev : NaN;
+  const treynor = (ab && Math.abs(ab.beta)>1e-9) ? (annArith-rfA)/ab.beta : NaN;
+  let infoRatio = NaN;
+  if(benchStats){
+    const n=Math.min(rets.length, benchStats.rets.length);
+    const diffs=[]; for(let i=0;i<n;i++) diffs.push(rets[i]-benchStats.rets[i]);
+    const dm=diffs.reduce((a,b)=>a+b,0)/n;
+    const ds=Math.sqrt(diffs.reduce((a,b)=>a+(b-dm)*(b-dm),0)/n);
+    infoRatio = ds>0 ? dm*252/(ds*Math.sqrt(252)) : NaN;
+  }
+  const winRate = rets.filter(r=>r>0).length/rets.length;
+  const expectancyDaily = rets.reduce((a,b)=>a+b,0)/rets.length;
+  const pfAnnual = annualReturns(pf, allDates);
+  const ddEps = drawdownEpisodes(pf, allDates, 5);
 
   const eqSpec = {
     data: [
@@ -551,12 +683,83 @@ function PortfolioPage({bt, setup}){
       <Metric label="年化報酬率" value={fmtPct(pfStats.cagr,true)} cls={retColor(pfStats.cagr)}/>
       <Metric label="組合波動率" value={fmtPct(pfStats.vol)}/>
       <Metric label="大盤波動率" value={benchStats?fmtPct(benchStats.vol):"-"}/>
-      <Metric label="夏普比率" value={fmtNum(pfStats.sharpe)}/>
+      <Metric label="夏普比率" value={fmtNum(sharpeRf)}/>
       <Metric label="組合最大回撤" value={fmtPct(pfStats.mdd)} cls="text-emerald-700"/>
     </div>
 
+    <Card>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h2 className="text-sm font-bold text-slate-700">風險績效指標</h2>
+        <label className="flex items-center gap-2 text-xs text-slate-500">
+          無風險利率（年 %）
+          <input type="number" step="0.1" min="0" value={rf}
+            onChange={e=>setRf(+e.target.value||0)}
+            className="border border-slate-300 rounded-lg px-2 py-1 w-20 text-sm tabular"/>
+        </label>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-x-6 gap-y-3 text-sm tabular">
+        {[
+          ["算術平均報酬（年化）", fmtPct(annArith,true), retColor(annArith)],
+          ["幾何平均報酬（年化）", fmtPct(pfStats.cagr,true), retColor(pfStats.cagr)],
+          ["年化標準差", fmtPct(pfStats.vol), ""],
+          ["下跌標準差（年化）", fmtPct(downsideDev), ""],
+          ["偏態", fmtNum(skew,3), skew<0?"text-emerald-700":""],
+          ["峰態", fmtNum(kurt,2), kurt>3?"text-amber-600":""],
+          ["相關係數（對大盤）", fmtNum(corr,3), ""],
+          ["Beta", ab?fmtNum(ab.beta,3):"-", ""],
+          ["Alpha（年化）", ab?fmtPct(ab.alphaAnnual,true):"-", ab?retColor(ab.alphaAnnual):""],
+          ["夏普指標", fmtNum(sharpeRf), ""],
+          ["索提諾指標", fmtNum(sortino), ""],
+          ["崔諾指標", fmtNum(treynor), ""],
+          ["信息指標", fmtNum(infoRatio), ""],
+          ["勝率（日）", fmtPct(winRate), ""],
+          ["期望值（單日）", fmtPct(expectancyDaily,true), retColor(expectancyDaily)],
+        ].map(([k,v,c])=>
+          <div key={k} className="flex justify-between border-b border-slate-100 pb-1">
+            <span className="text-slate-500">{k}</span><b className={c}>{v}</b>
+          </div>)}
+      </div>
+      <div className="text-xs text-slate-400 mt-3">
+        夏普／索提諾／崔諾皆以（年化報酬 − 無風險利率）為分子；偏態 &lt; 0 表示有巨大損失的潛在風險、峰態 &gt; 3 表示分佈高狹易受極端值影響；
+        信息指標衡量相對大盤的超額報酬穩定度；期望值＝上漲機率×平均漲幅＋下跌機率×平均跌幅。
+      </div>
+    </Card>
+
+    {pfAnnual.length>1 && <Card>
+      <PlotBox spec={{
+        data:[
+          {x:pfAnnual.map(a=>a.year), y:pfAnnual.map(a=>a.ret), type:"bar", name:"組合",
+           marker:{color:"#2563eb"}},
+          ...(benchAnnual? [{x:benchAnnual.map(a=>a.year), y:benchAnnual.map(a=>a.ret), type:"bar",
+           name:"櫃買指數", marker:{color:"#94a3b8"}}] : []),
+        ],
+        layout:{title:{text:"各年度報酬", font:{size:14}}, barmode:"group",
+          xaxis:{type:"category"}, yaxis:{tickformat:",.0%"}, legend:{orientation:"h", y:1.15}}
+      }} height={260}/>
+    </Card>}
+
     <Card><PlotBox spec={eqSpec} height={380}/></Card>
     <Card><PlotBox spec={ddSpec} height={220}/></Card>
+
+    <Card title="回撤明細（前 5 大）">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabular">
+          <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+            <th className="text-left py-2">回撤起始日</th><th className="text-left">谷底日</th>
+            <th className="text-left">虧損回復日</th><th className="text-right">最大回撤</th>
+            <th className="text-right">持續虧損（交易日）</th><th className="text-right">回漲期間（交易日）</th></tr></thead>
+          <tbody>{ddEps.map((e,i)=>
+            <tr key={i} className="border-b border-slate-100">
+              <td className="py-1.5">{e.start}</td><td>{e.trough}</td>
+              <td>{e.recover || <span className="text-amber-600">尚未回復</span>}</td>
+              <td className="text-right text-emerald-700">{fmtPct(e.depth)}</td>
+              <td className="text-right">{e.downDays}</td>
+              <td className="text-right">{e.recoverDays==null?"-":e.recoverDays}</td>
+            </tr>)}</tbody>
+        </table>
+      </div>
+      <div className="text-xs text-slate-400 mt-2">部位落水期間＝回撤起始日至虧損回復日；「尚未回復」表示至回測期末仍未回到前高。</div>
+    </Card>
 
     <Card title={`成分標的（等權重，各佔 ${fmtPct(1/results.length)}）`}>
       <div className="overflow-x-auto">
@@ -638,7 +841,7 @@ function App(){
   return <div className="max-w-6xl mx-auto px-4 py-6">
     <header className="mb-5">
       <h1 className="text-2xl font-bold">櫃買市場蒙地卡羅回測分析</h1>
-      <p className="text-sm text-slate-500 mt-1">上櫃・興櫃限定｜策略回測 → 交易序列蒙地卡羅模擬 → 回撤風險評估。僅供研究，不構成投資建議。</p>
+      <p className="text-sm text-slate-500 mt-1">上櫃限定（股票／ETF／權證，另支援自訂上傳資料）｜策略回測 → 蒙地卡羅模擬 → 組合績效 vs 大盤。僅供研究，不構成投資建議。</p>
     </header>
     <nav className="flex flex-wrap gap-1 mb-5 bg-white rounded-xl border border-slate-200 p-1.5 shadow-sm">
       {PAGES.map((p,i)=>

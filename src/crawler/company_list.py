@@ -60,14 +60,14 @@ def fetch_otc_products(client: TpexClient, d: date) -> pd.DataFrame:
     Returns an empty frame on non-trading days.
     """
     frames = []
-    for type_code, kind in (("EE", "ETF"), ("EN", "ETN")):
+    for type_code, kind in (("EE", "ETF"), ("EN", "ETN"), ("WW", "權證")):
         body = {"date": to_query_date(d), "type": type_code, "id": "", "response": "json"}
         payload = client.post_query("afterTrading/otc", body)
         tables = payload.get("tables") or []
         rows = tables[0].get("data") if tables else []
         for r in rows:
             code, name = r[0].strip(), r[1].strip()
-            category = _etf_category(code, name) if kind == "ETF" else "ETN"
+            category = _etf_category(code, name) if kind == "ETF" else kind
             frames.append(
                 {
                     "code": code,
