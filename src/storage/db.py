@@ -55,6 +55,22 @@ CREATE TABLE IF NOT EXISTS fetched_months (
     PRIMARY KEY (code, month)
 );
 
+-- warrant static issuance terms (BS pricing inputs), bulk-synced from
+-- tpex_warrant_issue; refreshed periodically since strike/ratio can be
+-- adjusted (ex-dividend, cash capital increase) over a warrant's life
+CREATE TABLE IF NOT EXISTS warrant_terms (
+    code TEXT PRIMARY KEY,
+    underlying_code TEXT NOT NULL,
+    underlying_name TEXT,
+    type TEXT NOT NULL,        -- 'call' or 'put'
+    style TEXT NOT NULL,       -- 'european' or 'american'
+    strike REAL NOT NULL,
+    ratio REAL NOT NULL,       -- 履約比例: shares of underlying per warrant unit
+    listed_date TEXT,
+    expiry_date TEXT NOT NULL,
+    synced_at TEXT NOT NULL
+);
+
 -- user-uploaded price datasets
 CREATE TABLE IF NOT EXISTS custom_datasets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,6 +203,46 @@ def covered_date_range(conn: sqlite3.Connection, market: str) -> tuple[str | Non
         "SELECT MIN(date), MAX(date) FROM daily_quotes WHERE market=?", (market,)
     ).fetchone()
     return (row[0], row[1]) if row else (None, None)
+
+
+def upsert_warrant_terms(conn: sqlite3.Connection, df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    from datetime import datetime
+
+    now = datetime.now().isoformat(timespec="seconds")
+    cols = ["code", "underlying_code", "underlying_name", "type", "style",
+            "strike", "ratio", "listed_date", "expiry_date"]
+    rows = [tuple(r) + (now,) for r in df[cols].itertuples(index=False, name=None)]
+    conn.executemany(
+        f"""INSERT INTO warrant_terms ({", ".join(cols)}, synced_at)
+            VALUES ({", ".join(["?"] * (len(cols) + 1))})
+            ON CONFLICT(code) DO UPDATE SET
+              underlying_code=excluded.underlying_code, underlying_name=excluded.underlying_name,
+              type=excluded.type, style=excluded.style, strike=excluded.strike,
+              ratio=excluded.ratio, listed_date=excluded.listed_date,
+              expiry_date=excluded.expiry_date, synced_at=excluded.synced_at""",
+        rows,
+    )
+    conn.commit()
+
+
+def get_warrant_terms(conn: sqlite3.Connection, code: str) -> dict | None:
+    row = conn.execute(
+        """SELECT code, underlying_code, underlying_name, type, style, strike, ratio,
+                  listed_date, expiry_date, synced_at
+           FROM warrant_terms WHERE code=?""",
+        (code,),
+    ).fetchone()
+    if row is None:
+        return None
+    cols = ["code", "underlying_code", "underlying_name", "type", "style", "strike",
+            "ratio", "listed_date", "expiry_date", "synced_at"]
+    return dict(zip(cols, row))
+
+
+def warrant_terms_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM warrant_terms").fetchone()[0]
 
 
 def month_fetched(conn: sqlite3.Connection, code: str, month: str) -> bool:

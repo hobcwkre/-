@@ -14,6 +14,7 @@ from datetime import date, datetime
 
 from src.crawler.client import TpexClient
 from src.crawler.update import sync_companies, sync_daily_range, sync_index_range
+from src.crawler.warrant_terms import fetch_warrant_terms
 from src.storage import db
 
 
@@ -53,6 +54,15 @@ def cmd_sync_quotes(args: argparse.Namespace) -> None:
     print(f"syncing {args.market} quotes {start} -> {end} (delay={args.delay}s/request)")
     result = sync_daily_range(client, conn, args.market, start, end, valid_codes=valid_codes)
     print(f"done: {result}")
+
+
+def cmd_sync_warrant_terms(args: argparse.Namespace) -> None:
+    conn = db.get_conn()
+    db.init_db(conn)
+    client = TpexClient(delay=args.delay)
+    df = fetch_warrant_terms(client)
+    db.upsert_warrant_terms(conn, df)
+    print(f"warrant terms synced: {len(df)} rows (total in DB: {db.warrant_terms_count(conn)})")
 
 
 def cmd_sync_index(args: argparse.Namespace) -> None:
@@ -102,6 +112,10 @@ def main() -> None:
     p.add_argument("--end", type=_parse_date, default=None, help="YYYY-MM-DD (default: today)")
     p.add_argument("--delay", type=float, default=0.4)
     p.set_defaults(func=cmd_sync_index)
+
+    p = sub.add_parser("sync-warrant-terms")
+    p.add_argument("--delay", type=float, default=0.4)
+    p.set_defaults(func=cmd_sync_warrant_terms)
 
     sub.add_parser("status").set_defaults(func=cmd_status)
 

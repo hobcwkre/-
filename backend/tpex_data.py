@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 from src.crawler.client import TpexClient  # noqa: E402
 from src.crawler.daily_quotes import fetch_stock_month  # noqa: E402
 from src.crawler.market_index import month_starts  # noqa: E402
+from src.crawler.warrant_terms import fetch_warrant_terms  # noqa: E402
 from src.storage import db  # noqa: E402
 
 # TPEx official industry classification codes (as used by the TPEx quote pages)
@@ -182,6 +183,21 @@ def coverage() -> dict:
     conn = _conn()
     lo_otc, hi_otc = db.covered_date_range(conn, "otc")
     return {"otc": [lo_otc, hi_otc]}
+
+
+def get_warrant_terms(code: str) -> dict | None:
+    """Static contract terms for a warrant, fetching the whole (bulk) table on
+    first use if the DB doesn't have it yet."""
+    conn = _conn()
+    terms = db.get_warrant_terms(conn, code)
+    if terms is None and db.warrant_terms_count(conn) == 0:
+        try:
+            df = fetch_warrant_terms(_get_client())
+            db.upsert_warrant_terms(conn, df)
+        except Exception:  # noqa: BLE001
+            return None
+        terms = db.get_warrant_terms(conn, code)
+    return terms
 
 
 def add_custom_dataset(name: str, df: pd.DataFrame) -> dict:

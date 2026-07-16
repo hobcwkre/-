@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from . import backtest as bt
 from . import monte_carlo as mc
 from . import tpex_data
+from . import warrant_pricing as wp
 
 def _json_safe(o):
     """Replace non-finite floats (NaN/inf) with None so responses stay valid JSON."""
@@ -68,6 +69,36 @@ def benchmark(start: str, end: str):
         "dates": [str(d.date()) for d in s.index],
         "closes": [float(v) for v in s.values],
     }
+
+
+# ---------------------------------------------------------------- warrant valuation
+
+@app.get("/api/warrant/{code}/pricing")
+def warrant_pricing(code: str, start: str, end: str, risk_free_rate: float = 1.6, hv_window: int = 60):
+    """Theoretical price (via underlying HV) + implied vol, day by day, for one warrant."""
+    terms = tpex_data.get_warrant_terms(code)
+    if terms is None:
+        raise HTTPException(404, "查無此權證的發行條款資料")
+    if not terms["type"] or not terms["style"]:
+        raise HTTPException(400, "此權證條款資料不完整（缺少買賣權或美/歐式別）")
+
+    underlying_info = tpex_data.security_info(terms["underlying_code"])
+    underlying_market = underlying_info["market"] if underlying_info else "otc"
+    underlying_px = tpex_data.load_prices(terms["underlying_code"], underlying_market, start, end)
+    warrant_px = tpex_data.load_prices(code, "otc", start, end)
+    if underlying_px.empty or warrant_px.empty:
+        raise HTTPException(400, "標的股或權證在此區間查無價格資料")
+
+    result = wp.build_pricing_series(
+        terms, underlying_px["close"].dropna(), warrant_px["close"].dropna(),
+        risk_free_rate=risk_free_rate / 100, hv_window=hv_window,
+    )
+    result["code"] = code
+    result["underlying_code"] = terms["underlying_code"]
+    result["underlying_name"] = terms["underlying_name"]
+    result["risk_free_rate"] = risk_free_rate
+    result["hv_window"] = hv_window
+    return _json_safe(result)
 
 
 # ---------------------------------------------------------------- custom data upload

@@ -815,8 +815,160 @@ function PortfolioPage({bt, setup}){
   </div>;
 }
 
+/* ---------- page 6: standalone warrant valuation (Black-Scholes) ---------- */
+function WarrantValuationPage(){
+  const [search, setSearch] = useState("");
+  const [suggest, setSuggest] = useState([]);
+  const [warrant, setWarrant] = useState(null);
+  const [start, setStart] = useState("2025-07-01");
+  const [end, setEnd] = useState(new Date().toISOString().slice(0,10));
+  const [rf, setRf] = useState(1.6);
+  const [hvWindow, setHvWindow] = useState(60);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(()=>{
+    const q = search.trim();
+    if(!q){ setSuggest([]); return; }
+    let cancelled = false;
+    apiGet("/api/securities?category=權證").then(d=>{
+      if(cancelled) return;
+      const ql = q.toLowerCase();
+      setSuggest(d.securities.filter(s=>s.code.toLowerCase().includes(ql)||s.name.includes(q)).slice(0,15));
+    });
+    return ()=>{ cancelled=true; };
+  },[search]);
+
+  const runValuation = async ()=>{
+    if(!warrant) return;
+    setBusy(true); setErr(""); setData(null);
+    try{
+      const j = await apiGet(`/api/warrant/${warrant.code}/pricing?start=${start}&end=${end}&risk_free_rate=${rf}&hv_window=${hvWindow}`);
+      setData(j);
+    }catch(e){ setErr(String(e.message||e)); }
+    setBusy(false);
+  };
+
+  const rows = data ? data.rows.filter(r=>r.theoretical_price!=null) : [];
+  const priceSpec = rows.length ? {
+    data:[
+      {x:rows.map(r=>r.date), y:rows.map(r=>r.market_price), type:"scatter", mode:"lines",
+       name:"市價", line:{color:"#2563eb", width:2}},
+      {x:rows.map(r=>r.date), y:rows.map(r=>r.theoretical_price), type:"scatter", mode:"lines",
+       name:"理論價（HV）", line:{color:"#d97706", width:2, dash:"dash"}},
+    ],
+    layout:{title:{text:"市價 vs 理論價", font:{size:14}}, legend:{orientation:"h", y:1.15}}
+  } : null;
+  const mispSpec = rows.length ? {
+    data:[{x:rows.map(r=>r.date), y:rows.map(r=>r.mispricing_pct*100), type:"scatter", mode:"lines",
+      fill:"tozeroy", line:{color:"#7c3aed", width:1.5}, name:"偏離度"}],
+    layout:{title:{text:"價格偏離度（市價／理論價 − 1）", font:{size:14}}, yaxis:{ticksuffix:"%"}}
+  } : null;
+  const volSpec = rows.length ? {
+    data:[
+      {x:rows.map(r=>r.date), y:rows.map(r=>r.hv*100), type:"scatter", mode:"lines",
+       name:"標的歷史波動率 HV", line:{color:"#0d9488", width:2}},
+      {x:data.rows.filter(r=>r.iv!=null).map(r=>r.date),
+       y:data.rows.filter(r=>r.iv!=null).map(r=>r.iv*100), type:"scatter", mode:"lines",
+       name:"隱含波動率 IV", line:{color:"#dc2626", width:2}},
+    ],
+    layout:{title:{text:"隱含波動率 vs 標的歷史波動率", font:{size:14}}, yaxis:{ticksuffix:"%"}, legend:{orientation:"h", y:1.15}}
+  } : null;
+
+  const last = rows.length ? rows[rows.length-1] : null;
+  const lastIvRow = data ? [...data.rows].reverse().find(r=>r.iv!=null) : null;
+
+  return <div className="grid gap-4">
+    <Card title="選擇權證">
+      <div className="grid md:grid-cols-4 gap-3 items-end">
+        <div className="md:col-span-2 relative">
+          <Field label="搜尋權證代號或名稱">
+            <input type="text" className={inputCls} value={search}
+              onChange={e=>{setSearch(e.target.value); setWarrant(null);}}
+              placeholder="例：705674 或 環球晶"/>
+          </Field>
+          {suggest.length>0 && !warrant && <div className="absolute z-10 top-full left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-lg mt-1 max-h-60 overflow-y-auto">
+            {suggest.map(s=>
+              <div key={s.code} className="px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer"
+                onClick={()=>{setWarrant(s); setSearch(`${s.code} ${s.name}`); setSuggest([]);}}>
+                {s.code} {s.name}
+              </div>)}
+          </div>}
+        </div>
+        <Field label="開始日期"><input type="date" className={inputCls} value={start} onChange={e=>setStart(e.target.value)}/></Field>
+        <Field label="結束日期"><input type="date" className={inputCls} value={end} onChange={e=>setEnd(e.target.value)}/></Field>
+      </div>
+      <div className="grid md:grid-cols-4 gap-3 items-end mt-3">
+        <Field label="無風險利率（年 %）"><input type="number" step="0.1" className={inputCls} value={rf} onChange={e=>setRf(+e.target.value||0)}/></Field>
+        <Field label="歷史波動率窗口（交易日）"><input type="number" step="5" min="10" className={inputCls} value={hvWindow} onChange={e=>setHvWindow(+e.target.value||60)}/></Field>
+        <button onClick={runValuation} disabled={!warrant||busy}
+          className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-lg px-6 py-2.5 text-sm font-bold">
+          {busy?"計算中...":"執行評價"}
+        </button>
+      </div>
+      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+      <div className="text-xs text-slate-400 mt-3">
+        理論價使用<b>標的歷史波動率（HV）</b>代入 Black-Scholes 計算，與市價比較看價格面是否偏貴／偏便宜；
+        隱含波動率（IV）則是反推自市價本身，與 HV 比較看波動率面是否偏貴／偏便宜——兩者是互補但不同的問題，
+        IV 不會拿去計算理論價（那樣理論價會恆等於市價，失去比較意義）。
+        美式權證以歐式模型近似（無股利下提前履約不划算，此為業界常見簡化）。
+      </div>
+    </Card>
+
+    {data && <>
+      <Card>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <div><span className="text-slate-500">標的：</span><b>{data.underlying_code} {data.underlying_name}</b></div>
+          <div><span className="text-slate-500">買賣權／類型：</span><b>{data.type==="call"?"認購":"認售"}／{data.style==="american"?"美式":"歐式"}</b></div>
+          <div><span className="text-slate-500">履約價：</span><b className="tabular">{fmtNum(data.strike)}</b></div>
+          <div><span className="text-slate-500">履約比例：</span><b className="tabular">{data.ratio}</b></div>
+          <div><span className="text-slate-500">到期日：</span><b>{data.expiry}</b></div>
+          <div><span className="text-slate-500">無風險利率：</span><b>{data.risk_free_rate}%</b></div>
+          <div><span className="text-slate-500">HV 窗口：</span><b>{data.hv_window} 交易日</b></div>
+        </div>
+      </Card>
+
+      {last && <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Metric label="最新市價" value={fmtNum(last.market_price)}/>
+        <Metric label="最新理論價（HV）" value={fmtNum(last.theoretical_price)}/>
+        <Metric label="價格偏離度" value={fmtPct(last.mispricing_pct,true)} cls={retColor(last.mispricing_pct)}/>
+        <Metric label="剩餘天數" value={last.days_to_expiry+" 天"}/>
+      </div>}
+
+      {rows.length===0 && <Card><div className="text-sm text-slate-400">此區間內標的股波動率窗口不足或權證無成交資料，無法計算理論價。</div></Card>}
+
+      {priceSpec && <Card><PlotBox spec={priceSpec} height={320}/></Card>}
+      {mispSpec && <Card><PlotBox spec={mispSpec} height={220}/></Card>}
+      {volSpec && <Card><PlotBox spec={volSpec} height={280}/></Card>}
+
+      {lastIvRow && lastIvRow.greeks && <Card title={`最新 Greeks（${lastIvRow.date}，IV = ${fmtPct(lastIvRow.iv)}）`}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm tabular">
+            <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
+              <th className="text-left py-2"></th><th className="text-right">每股標準值（Δ/Γ/Vega/Θ 之教科書定義）</th>
+              <th className="text-right">每張權證實際值（× 履約比例 {data.ratio}）</th></tr></thead>
+            <tbody>
+              {[["Delta","delta"],["Gamma","gamma"],["Vega","vega"],["Theta（每日）","theta"]].map(([label,key])=>
+                <tr key={key} className="border-b border-slate-100">
+                  <td className="py-1.5 font-medium">{label}</td>
+                  <td className="text-right">{fmtNum(lastIvRow.greeks[key+"_per_share"],4)}</td>
+                  <td className="text-right">{fmtNum(lastIvRow.greeks[key+"_per_warrant"],4)}</td>
+                </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <div className="text-xs text-slate-400 mt-2">
+          「每股標準值」是把權證當作一般選擇權、以一股標的股計算的教科書 Greeks；
+          「每張權證實際值」才是這張權證真正的曝險（已乘上履約比例），例如 Delta 0.01 代表標的漲 1 元、這張權證約漲 0.01 元。
+        </div>
+      </Card>}
+    </>}
+  </div>;
+}
+
 /* ---------- app ---------- */
-const PAGES = ["① 設定","② 回測結果","③ 蒙地卡羅設定","④ 蒙地卡羅結果","⑤ 組合績效 vs 大盤"];
+const PAGES = ["① 設定","② 回測結果","③ 蒙地卡羅設定","④ 蒙地卡羅結果","⑤ 組合績效 vs 大盤","⑥ 權證評價"];
 function App(){
   const [page, setPage] = useState(0);
   const [setup, setSetup] = useState({
@@ -878,6 +1030,7 @@ function App(){
     {page===2 && <MCSetupPage bt={bt} mcState={mcState} setMcState={setMcState} onRun={runMC}/>}
     {page===3 && <MCResultPage bt={bt} mcTarget={mcState.target} mcResults={mcResults}/>}
     {page===4 && <PortfolioPage bt={bt} setup={setup}/>}
+    {page===5 && <WarrantValuationPage/>}
   </div>;
 }
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
