@@ -61,6 +61,19 @@ def coverage():
     return tpex_data.coverage()
 
 
+_SCOPE_CATEGORIES = {"上櫃", "ETF", "債券ETF", "權證", "自訂資料"}
+
+
+@app.get("/api/security/{code}")
+def security_lookup(code: str):
+    """Direct code lookup (for the type-a-code add flow), scoped to this app."""
+    info = tpex_data.security_info(code.strip())
+    if info is None or info["category"] not in _SCOPE_CATEGORIES:
+        raise HTTPException(404, "查無此代碼（本系統僅支援上櫃股票／ETF／權證與自訂資料）")
+    info["board"] = "自訂" if info["market"] == "custom" else "上櫃"
+    return info
+
+
 @app.get("/api/benchmark")
 def benchmark(start: str, end: str):
     """櫃買指數 daily closes for the benchmark comparison."""

@@ -45,10 +45,41 @@ function Field({label, children}){
   </div>;
 }
 const inputCls = "border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500";
-function Metric({label, value, cls=""}){
-  return <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-4 py-3">
+function Metric({label, value, cls="", onDetail}){
+  return <div onClick={onDetail}
+    className={"bg-white rounded-xl border border-slate-200 shadow-sm px-4 py-3 relative "
+      +(onDetail?"cursor-pointer hover:border-blue-400 hover:shadow":"")}>
+    {onDetail && <span className="absolute top-1.5 right-2.5 text-slate-300 text-xs" title="點擊查看公式與計算">ⓘ</span>}
     <div className="text-xs text-slate-500">{label}</div>
     <div className={"text-xl font-bold tabular "+cls}>{value}</div>
+  </div>;
+}
+function DetailModal({detail, onClose}){
+  useEffect(()=>{
+    const onKey = e=>{ if(e.key==="Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return ()=>document.removeEventListener("keydown", onKey);
+  },[onClose]);
+  if(!detail) return null;
+  return <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 max-h-[85vh] overflow-y-auto"
+         onClick={e=>e.stopPropagation()} role="dialog" aria-modal="true">
+      <div className="flex justify-between items-start mb-3">
+        <h3 className="font-bold text-base">{detail.title}</h3>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none px-1">✕</button>
+      </div>
+      <div className="text-xs font-bold text-slate-500 mb-1">公式</div>
+      <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-mono whitespace-pre-wrap mb-4">{detail.formula}</div>
+      <div className="text-xs font-bold text-slate-500 mb-1">代入實際數字</div>
+      <table className="w-full text-sm tabular mb-4">
+        <tbody>{detail.steps.map(([k,v],i)=>
+          <tr key={i} className="border-b border-slate-100">
+            <td className="py-1.5 text-slate-500 pr-3 align-top">{k}</td>
+            <td className="text-right font-medium break-all">{v}</td>
+          </tr>)}</tbody>
+      </table>
+      {detail.note && <div className="text-xs text-slate-400 leading-relaxed">{detail.note}</div>}
+    </div>
   </div>;
 }
 function PlotBox({spec, height=340}){
@@ -160,6 +191,23 @@ function SetupPage({state, setState, onRun, running}){
     const sec = securities.find(s=>s.code===secCode);
     if(sec && !chips.some(c=>c.code===sec.code)) set({chips:[...chips, sec]});
   };
+  const [codeInput, setCodeInput] = useState("");
+  const [codeErr, setCodeErr] = useState("");
+  const addByCode = async ()=>{
+    const q = codeInput.trim();
+    if(!q) return;
+    setCodeErr("");
+    if(chips.some(c=>c.code===q)){ setCodeInput(""); return; }
+    try{
+      const info = await apiGet("/api/security/"+encodeURIComponent(q));
+      set({chips:[...chips, info]});
+      setCodeInput("");
+    }catch(e){
+      let msg = String(e.message||e);
+      try{ msg = JSON.parse(msg).detail || msg; }catch(_){}
+      setCodeErr(msg);
+    }
+  };
   return <div className="grid gap-4">
     <Card title="標的選擇（上櫃：股票／ETF／權證，另可上傳自訂資料）">
       <div className="grid md:grid-cols-4 gap-3 items-end">
@@ -182,6 +230,19 @@ function SetupPage({state, setState, onRun, running}){
         </Field>
         <button onClick={addChip}
           className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 text-sm font-bold">＋ 加入</button>
+      </div>
+      <div className="flex flex-wrap gap-3 items-end mt-3">
+        <div className="flex-none w-56">
+          <Field label="或直接輸入代碼（例：6488、00679B、705674、U1）">
+            <input type="text" className={inputCls} value={codeInput}
+              onChange={e=>{setCodeInput(e.target.value); setCodeErr("");}}
+              onKeyDown={e=>{ if(e.key==="Enter") addByCode(); }}
+              placeholder="輸入代碼後按 Enter"/>
+          </Field>
+        </div>
+        <button onClick={addByCode}
+          className="bg-slate-700 hover:bg-slate-800 text-white rounded-lg px-4 py-2 text-sm font-bold">以代碼加入</button>
+        {codeErr && <span className="text-sm text-red-600 pb-2">{codeErr}</span>}
       </div>
       <div className="flex flex-wrap gap-2 mt-4">
         {chips.length===0 && <span className="text-sm text-slate-400">尚未加入標的，可複選多檔。</span>}
@@ -264,12 +325,82 @@ function csvDownload(filename, rows, headers){
   // revoking immediately can cancel the download in some browsers — defer it
   setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 2000);
 }
+function p2Details(r){
+  const eq = r.equity_curve, dts = r.dates, m = r.metrics;
+  const n = eq.length, E0 = eq[0], E1 = eq[n-1];
+  const rets = []; for(let i=1;i<n;i++) rets.push(eq[i]/eq[i-1]-1);
+  const mean = rets.reduce((a,b)=>a+b,0)/rets.length;
+  const sd = Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length);
+  const days = (new Date(dts[n-1]) - new Date(dts[0]))/864e5;
+  const years = days/365.25;
+  // max drawdown episode (peak & trough)
+  let peak = eq[0], peakI = 0, mdd = 0, troughI = 0, mddPeakI = 0;
+  eq.forEach((v,i)=>{
+    if(v>peak){ peak=v; peakI=i; }
+    const dd = v/peak-1;
+    if(dd<mdd){ mdd=dd; troughI=i; mddPeakI=peakI; }
+  });
+  const wins = r.trades.filter(t=>t.return>0), losses = r.trades.filter(t=>t.return<0);
+  const avgW = wins.length ? wins.reduce((a,t)=>a+t.return,0)/wins.length : NaN;
+  const avgL = losses.length ? losses.reduce((a,t)=>a+t.return,0)/losses.length : NaN;
+  const reasonCount = reason => r.trades.filter(t=>t.reason===reason).length;
+  const F = (x,d=6)=> (x==null||!isFinite(x)) ? "-" : Number(x).toFixed(d);
+  const vol = sd*Math.sqrt(252);
+  return {
+    total: {title:"報酬率", formula:"報酬率 = 期末權益 ÷ 期初本金 − 1",
+      steps:[["期初本金 E₀（第一天權益）", fmtNum(E0)],["期末權益 E₁（最後一天權益）", fmtNum(E1)],
+        ["計算", `${fmtNum(E1)} ÷ ${fmtNum(E0)} − 1 = ${F(E1/E0-1)}`],
+        ["顯示值", fmtPct(m.total_return,true)]],
+      note:"權益曲線每日以收盤價結算，已扣交易成本（手續費 0.1425%×買賣各一次＋賣出證交稅 0.3%，按槓桿名目計）。可用「匯出每日權益 CSV」的第一列與最後一列核對。"},
+    vol: {title:"波動率（年化標準差）", formula:"波動率 = STDEV.P(每日報酬率) × √252",
+      steps:[["每日報酬率樣本數 n", rets.length],["日報酬平均 μ", F(mean,8)],
+        ["日報酬母體標準差 σ（除以 n）", F(sd,8)],
+        ["計算", `${F(sd,8)} × √252 = ${F(vol)}`],["顯示值", fmtPct(m.volatility)]],
+      note:"用母體標準差（分母 n，Excel 的 STDEV.P）；√252 為台股年交易日數慣例。日報酬序列可由「匯出每日權益 CSV」取得。"},
+    cagr: {title:"年化報酬率 (CAGR)", formula:"CAGR = (期末權益 ÷ 期初本金) ^ (1 ÷ 年數) − 1\n年數 = 日曆天數 ÷ 365.25",
+      steps:[["期初 E₀ / 期末 E₁", `${fmtNum(E0)} / ${fmtNum(E1)}`],
+        ["日曆天數（首尾日期差）", `${days} 天`],["年數", F(years,4)],
+        ["計算", `(${F(E1/E0,6)}) ^ (1/${F(years,4)}) − 1 = ${F(Math.pow(E1/E0,1/years)-1)}`],
+        ["顯示值", fmtPct(m.cagr,true)]],
+      note:"幾何年化：短區間會把報酬複利外推到一整年，區間越短數字越誇大，解讀時要注意。"},
+    win: {title:"勝率", formula:"勝率 = 獲利交易筆數 ÷ 總交易筆數",
+      steps:[["獲利筆數（報酬率 > 0）", wins.length],["虧損筆數（報酬率 < 0）", losses.length],
+        ["總筆數", r.trades.length],
+        ["計算", r.trades.length? `${wins.length} ÷ ${r.trades.length} = ${F(wins.length/r.trades.length)}` : "-"],
+        ["顯示值", fmtPct(m.win_rate)]],
+      note:"逐筆交易統計（含期末強制平倉那筆）。每筆報酬率見「逐筆交易明細」表。"},
+    payoff: {title:"賺賠比", formula:"賺賠比 = 平均獲利 ÷ |平均虧損|",
+      steps:[["獲利交易平均報酬", fmtPct(avgW,true)],["虧損交易平均報酬", fmtPct(avgL,true)],
+        ["計算", (isFinite(avgW)&&isFinite(avgL))? `${F(avgW,6)} ÷ |${F(avgL,6)}| = ${F(avgW/Math.abs(avgL))}` : "-（需同時有獲利與虧損交易）"],
+        ["顯示值", fmtNum(m.payoff_ratio)]],
+      note:"僅分別對「有賺」「有賠」的交易取平均；若全勝或全敗則無法計算，顯示 -。"},
+    sharpe: {title:"夏普比率（Rf 0%）", formula:"夏普 = (日報酬平均 × 252) ÷ (日報酬標準差 × √252)",
+      steps:[["日報酬平均 μ", F(mean,8)],["年化報酬（μ×252）", F(mean*252)],
+        ["年化波動（σ×√252）", F(vol)],
+        ["計算", `${F(mean*252)} ÷ ${F(vol)} = ${F(mean*252/vol)}`],
+        ["顯示值", fmtNum(m.sharpe)]],
+      note:"本頁未扣無風險利率（Rf=0）。「⑤ 組合績效」頁的夏普以（年化報酬 − Rf）為分子，Rf 可自訂。"},
+    mdd: {title:"原始最大回撤", formula:"最大回撤 = min( 當日權益 ÷ 截至當日歷史最高權益 − 1 )",
+      steps:[["回撤前高點", `${dts[mddPeakI]}，權益 ${fmtNum(eq[mddPeakI])}`],
+        ["回撤谷底", `${dts[troughI]}，權益 ${fmtNum(eq[troughI])}`],
+        ["計算", `${fmtNum(eq[troughI])} ÷ ${fmtNum(eq[mddPeakI])} − 1 = ${F(eq[troughI]/eq[mddPeakI]-1)}`],
+        ["顯示值", fmtPct(m.max_drawdown)]],
+      note:"逐日檢查（日線口徑，含持倉期間未實現損益）。「匯出每日權益 CSV」的「當日權益 ÷ 當日歷史最高權益 − 1」取最小值即可驗算。"},
+    ntr: {title:"交易次數", formula:"交易次數 = 已平倉交易筆數（含期末強制平倉）",
+      steps:[["訊號出場", reasonCount("訊號出場")],["停損出場", reasonCount("停損")],
+        ["期末平倉", reasonCount("期末平倉")],["合計", r.trades.length]],
+      note:"一買一賣算一筆。期末仍持有的部位以最後一天收盤價強制平倉並計入。"},
+  };
+}
+
 function ResultPage({bt, activeCode, setActiveCode}){
   const [showTrades, setShowTrades] = useState(false);
+  const [detail, setDetail] = useState(null);
   if(!bt) return <Card><div className="text-slate-400 text-sm">尚未執行回測，請先於「① 設定」頁執行。</div></Card>;
   const codes = Object.keys(bt.results);
   const r = bt.results[activeCode] || bt.results[codes[0]];
   const m = r.metrics;
+  const D = p2Details(r);
   const eqSpec = {
     data:[{x:r.dates, y:r.equity_curve, type:"scatter", mode:"lines", name:"權益",
            line:{color:"#2563eb", width:2}}],
@@ -288,14 +419,14 @@ function ResultPage({bt, activeCode, setActiveCode}){
         <span key={c} className="text-xs text-red-500">（{c}：{e}）</span>)}
     </div>
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-      <Metric label="報酬率" value={fmtPct(m.total_return,true)} cls={retColor(m.total_return)}/>
-      <Metric label="波動率（年化標準差）" value={fmtPct(m.volatility)}/>
-      <Metric label="年化報酬率" value={fmtPct(m.cagr,true)} cls={retColor(m.cagr)}/>
-      <Metric label="勝率" value={fmtPct(m.win_rate)}/>
-      <Metric label="賺賠比" value={fmtNum(m.payoff_ratio)}/>
-      <Metric label="夏普比率（Rf 0%）" value={fmtNum(m.sharpe)}/>
-      <Metric label="原始最大回撤" value={fmtPct(m.max_drawdown)} cls="text-emerald-700"/>
-      <Metric label="交易次數" value={m.num_trades}/>
+      <Metric label="報酬率" value={fmtPct(m.total_return,true)} cls={retColor(m.total_return)} onDetail={()=>setDetail(D.total)}/>
+      <Metric label="波動率（年化標準差）" value={fmtPct(m.volatility)} onDetail={()=>setDetail(D.vol)}/>
+      <Metric label="年化報酬率" value={fmtPct(m.cagr,true)} cls={retColor(m.cagr)} onDetail={()=>setDetail(D.cagr)}/>
+      <Metric label="勝率" value={fmtPct(m.win_rate)} onDetail={()=>setDetail(D.win)}/>
+      <Metric label="賺賠比" value={fmtNum(m.payoff_ratio)} onDetail={()=>setDetail(D.payoff)}/>
+      <Metric label="夏普比率（Rf 0%）" value={fmtNum(m.sharpe)} onDetail={()=>setDetail(D.sharpe)}/>
+      <Metric label="原始最大回撤" value={fmtPct(m.max_drawdown)} cls="text-emerald-700" onDetail={()=>setDetail(D.mdd)}/>
+      <Metric label="交易次數" value={m.num_trades} onDetail={()=>setDetail(D.ntr)}/>
     </div>
     <div className="text-xs text-slate-400">
       本頁夏普比率＝日報酬平均×252 ÷（日報酬標準差×√252），未扣無風險利率（Rf = 0%）；
@@ -350,6 +481,7 @@ function ResultPage({bt, activeCode, setActiveCode}){
         </table>
       </div>}
     </Card>
+    <DetailModal detail={detail} onClose={()=>setDetail(null)}/>
   </div>;
 }
 
