@@ -284,9 +284,14 @@ function ResultPage({bt, activeCode, setActiveCode}){
       <Metric label="年化報酬率" value={fmtPct(m.cagr,true)} cls={retColor(m.cagr)}/>
       <Metric label="勝率" value={fmtPct(m.win_rate)}/>
       <Metric label="賺賠比" value={fmtNum(m.payoff_ratio)}/>
-      <Metric label="夏普比率" value={fmtNum(m.sharpe)}/>
+      <Metric label="夏普比率（Rf 0%）" value={fmtNum(m.sharpe)}/>
       <Metric label="原始最大回撤" value={fmtPct(m.max_drawdown)} cls="text-emerald-700"/>
       <Metric label="交易次數" value={m.num_trades}/>
+    </div>
+    <div className="text-xs text-slate-400">
+      本頁夏普比率＝日報酬平均×252 ÷（日報酬標準差×√252），未扣無風險利率（Rf = 0%）；
+      「⑤ 組合績效」頁的夏普採（年化報酬 − 無風險利率）為分子，Rf 可於該頁自訂。
+      驗算素材可由下方「匯出每日權益 CSV」取得。
     </div>
     <Card><PlotBox spec={eqSpec}/></Card>
     <Card title="迴歸統計表（策略日報酬 ～ 標的收盤價日報酬）"><RegressionTable reg={r.regression}/></Card>
@@ -299,7 +304,24 @@ function ResultPage({bt, activeCode, setActiveCode}){
           <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
             onClick={()=>csvDownload(`trades_${r.code}.csv`,
               r.trades.map(t=>({...t, return:(t.return*100).toFixed(3)+"%", pnl:t.pnl.toFixed(0)})),
-              ["entry_date","exit_date","entry_price","exit_price","return","pnl","reason"])}>匯出 CSV</button>
+              ["entry_date","exit_date","entry_price","exit_price","return","pnl","reason"])}>匯出交易明細 CSV</button>
+          <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
+            onClick={()=>{
+              let peak = -Infinity;
+              const rows = r.dates.map((d,i)=>{
+                const eq = r.equity_curve[i];
+                peak = Math.max(peak, eq);
+                return {
+                  "日期": d,
+                  "當日權益": eq.toFixed(2),
+                  "當日報酬率": i===0 ? "" : (r.equity_curve[i]/r.equity_curve[i-1]-1).toFixed(8),
+                  "是否持倉": r.positions ? r.positions[i] : "",
+                  "當日歷史最高權益": peak.toFixed(2),
+                };
+              });
+              csvDownload(`equity_${r.code}.csv`, rows,
+                ["日期","當日權益","當日報酬率","是否持倉","當日歷史最高權益"]);
+            }}>匯出每日權益 CSV</button>
         </div>
       </div>
       {showTrades && <div className="overflow-x-auto mt-3">
@@ -683,7 +705,7 @@ function PortfolioPage({bt, setup}){
       <Metric label="年化報酬率" value={fmtPct(pfStats.cagr,true)} cls={retColor(pfStats.cagr)}/>
       <Metric label="組合波動率" value={fmtPct(pfStats.vol)}/>
       <Metric label="大盤波動率" value={benchStats?fmtPct(benchStats.vol):"-"}/>
-      <Metric label="夏普比率" value={fmtNum(sharpeRf)}/>
+      <Metric label={`夏普比率（Rf ${rf}%）`} value={fmtNum(sharpeRf)}/>
       <Metric label="組合最大回撤" value={fmtPct(pfStats.mdd)} cls="text-emerald-700"/>
     </div>
 
@@ -720,7 +742,8 @@ function PortfolioPage({bt, setup}){
           </div>)}
       </div>
       <div className="text-xs text-slate-400 mt-3">
-        夏普／索提諾／崔諾皆以（年化報酬 − 無風險利率）為分子；偏態 &lt; 0 表示有巨大損失的潛在風險、峰態 &gt; 3 表示分佈高狹易受極端值影響；
+        夏普／索提諾／崔諾皆以（算術平均年化報酬 − 無風險利率）為分子，<b>目前採用 Rf = {rf}%</b>（可於右上調整，數值即時重算）；
+        偏態 &lt; 0 表示有巨大損失的潛在風險、峰態 &gt; 3 表示分佈高狹易受極端值影響；
         信息指標衡量相對大盤的超額報酬穩定度；期望值＝上漲機率×平均漲幅＋下跌機率×平均跌幅。
       </div>
     </Card>

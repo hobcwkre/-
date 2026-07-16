@@ -123,6 +123,7 @@ def run_backtest(
 
     equity = capital
     equity_curve = np.empty(n)
+    position_flags = np.zeros(n, dtype=int)  # 1 = holding at that day's close
     trades: list[dict] = []
     in_pos = False
     entry_price = entry_equity = 0.0
@@ -159,10 +160,12 @@ def run_backtest(
             entry_equity = equity
             entry_date = dates[i]
         equity_curve[i] = equity
+        position_flags[i] = 1 if in_pos else 0
 
     if in_pos:
         close_trade(n - 1, "期末平倉")
         equity_curve[-1] = equity
+        position_flags[-1] = 0
 
     eq = pd.Series(equity_curve, index=dates)
     daily_ret = eq.pct_change().dropna()
@@ -192,6 +195,7 @@ def run_backtest(
         "strategy_label": strategy_label,
         "dates": [str(d.date()) for d in dates],
         "equity_curve": [round(float(v), 2) for v in equity_curve],
+        "positions": [int(v) for v in position_flags],
         "close": [float(c) for c in close],
         "trades": trades,
         "metrics": {
