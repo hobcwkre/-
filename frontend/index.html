@@ -249,11 +249,20 @@ function SetupPage({state, setState, onRun, running}){
 
 /* ---------- page 2: backtest results ---------- */
 function csvDownload(filename, rows, headers){
-  const lines = [headers.join(",")].concat(rows.map(r=>headers.map(h=>r[h]).join(",")));
-  const blob = new Blob(["﻿"+lines.join("\n")], {type:"text/csv;charset=utf-8"});
+  const escCell = v => {
+    const s = v==null ? "" : String(v);
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  };
+  const lines = [headers.join(",")].concat(rows.map(r=>headers.map(h=>escCell(r[h])).join(",")));
+  // ﻿ BOM so Excel opens UTF-8 (Chinese headers) correctly; \r\n for Excel
+  const blob = new Blob(["﻿"+lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-  URL.revokeObjectURL(a.href);
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);   // Firefox needs the anchor in the DOM
+  a.click();
+  // revoking immediately can cancel the download in some browsers — defer it
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 2000);
 }
 function ResultPage({bt, activeCode, setActiveCode}){
   const [showTrades, setShowTrades] = useState(false);
