@@ -76,6 +76,18 @@ def coverage():
     return tpex_data.coverage()
 
 
+@app.get("/api/memstat")
+def memstat():
+    """Current process memory (for verifying the 512MB-tier fixes in prod)."""
+    try:
+        import psutil
+
+        info = psutil.Process().memory_info()
+        return {"rss_mb": round(info.rss / 1048576, 1), "vms_mb": round(info.vms / 1048576, 1)}
+    except ImportError:
+        return {"rss_mb": None, "error": "psutil not installed"}
+
+
 _SCOPE_CATEGORIES = {"上櫃", "ETF", "債券ETF", "權證", "自訂資料"}
 
 
