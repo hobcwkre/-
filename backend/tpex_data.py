@@ -60,10 +60,17 @@ def _conn():
     return conn
 
 
+# NOTE: every function below queries exactly the rows it needs via SQL WHERE
+# instead of loading the whole 10k-row companies table into a DataFrame per
+# request (the old pattern cost a multi-MB transient allocation on every API
+# call, and /api/backtest repeated it once per selected code).
+
+_CAT_EXPR = "COALESCE(category, CASE market WHEN 'esb' THEN '興櫃' ELSE '上櫃' END)"
+
+
 def list_categories() -> list[str]:
     conn = _conn()
-    companies = db.load_companies(conn)
-    present = set(companies["category"])
+    present = {r[0] for r in conn.execute(f"SELECT DISTINCT {_CAT_EXPR} FROM companies")}
     tiers = []
     if "上櫃" in present:
         tiers.append("股票")
@@ -71,7 +78,8 @@ def list_categories() -> list[str]:
         tiers.append("ETF")
     if "權證" in present:
         tiers.append("權證")
-    if len(db.list_custom_datasets(conn)):
+    has_custom = conn.execute("SELECT 1 FROM custom_datasets LIMIT 1").fetchone()
+    if has_custom:
         tiers.append(CUSTOM_CATEGORY)
     return tiers
 
@@ -80,69 +88,63 @@ def list_industries(category: str) -> list[dict]:
     """Industry tier — only meaningful for 股票 (上櫃)."""
     if category != "股票":
         return []
-    companies = db.load_companies(_conn())
-    stocks = companies[companies["category"] == "上櫃"]
-    codes = sorted({c for c in stocks["industry_code"] if c and c in INDUSTRY_NAMES})
+    conn = _conn()
+    rows = conn.execute(
+        f"SELECT DISTINCT industry_code FROM companies WHERE {_CAT_EXPR}='上櫃'"
+    )
+    codes = sorted({r[0] for r in rows if r[0] and r[0] in INDUSTRY_NAMES})
     return [{"code": c, "name": INDUSTRY_NAMES[c]} for c in codes]
 
 
 def list_securities(category: str, industry: str | None = None) -> list[dict]:
     conn = _conn()
     if category == CUSTOM_CATEGORY:
-        ds = db.list_custom_datasets(conn)
+        rows = conn.execute("SELECT id, name FROM custom_datasets ORDER BY id")
         return [
-            {
-                "code": f"{CUSTOM_PREFIX}{r['id']}",
-                "name": r["name"],
-                "market": "custom",
-                "category": CUSTOM_CATEGORY,
-                "board": "自訂",
-            }
-            for _, r in ds.iterrows()
+            {"code": f"{CUSTOM_PREFIX}{ds_id}", "name": name, "market": "custom",
+             "category": CUSTOM_CATEGORY, "board": "自訂"}
+            for ds_id, name in rows
         ]
-    companies = db.load_companies(conn)
+    where, params = "", []
     if category == "股票":
-        subset = companies[companies["category"] == "上櫃"]
+        where = f"{_CAT_EXPR}='上櫃'"
         if industry:
-            subset = subset[subset["industry_code"] == industry]
+            where += " AND industry_code=?"
+            params.append(industry)
     elif category == "ETF":
-        subset = companies[companies["category"].isin(["ETF", "債券ETF"])]
+        where = f"{_CAT_EXPR} IN ('ETF','債券ETF')"
     elif category == "權證":
-        subset = companies[companies["category"] == "權證"]
+        where = f"{_CAT_EXPR}='權證'"
     else:
-        subset = companies.iloc[0:0]
-    subset = subset.sort_values("code")
+        return []
+    rows = conn.execute(
+        f"SELECT code, name, market, {_CAT_EXPR} FROM companies WHERE {where} ORDER BY code",
+        params,
+    )
     return [
-        {
-            "code": r["code"],
-            "name": r["name"],
-            "market": r["market"],
-            "category": r["category"],
-            "board": "上櫃",
-        }
-        for _, r in subset.iterrows()
+        {"code": code, "name": name, "market": market, "category": cat, "board": "上櫃"}
+        for code, name, market, cat in rows
     ]
 
 
 def security_info(code: str) -> dict | None:
     conn = _conn()
     if code.startswith(CUSTOM_PREFIX) and code[len(CUSTOM_PREFIX):].isdigit():
-        ds = db.list_custom_datasets(conn)
-        hit = ds[ds["id"] == int(code[len(CUSTOM_PREFIX):])]
-        if not hit.empty:
-            return {
-                "code": code, "name": hit.iloc[0]["name"],
-                "market": "custom", "category": CUSTOM_CATEGORY,
-            }
-        return None
-    companies = db.load_companies(conn)
-    hit = companies[companies["code"] == code]
-    if hit.empty:
+        row = conn.execute(
+            "SELECT name FROM custom_datasets WHERE id=?", (int(code[len(CUSTOM_PREFIX):]),)
+        ).fetchone()
+        if row:
+            return {"code": code, "name": row[0], "market": "custom", "category": CUSTOM_CATEGORY}
         return None
     # this app is 上櫃-scoped: prefer the otc row when a code exists on both boards
-    otc = hit[hit["market"] == "otc"]
-    r = (otc if not otc.empty else hit).iloc[0]
-    return {"code": r["code"], "name": r["name"], "market": r["market"], "category": r["category"]}
+    row = conn.execute(
+        f"""SELECT code, name, market, {_CAT_EXPR} FROM companies WHERE code=?
+            ORDER BY CASE market WHEN 'otc' THEN 0 ELSE 1 END LIMIT 1""",
+        (code,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"code": row[0], "name": row[1], "market": row[2], "category": row[3]}
 
 
 def _ensure_on_demand(code: str, start: str, end: str) -> None:
@@ -165,14 +167,21 @@ def _ensure_on_demand(code: str, start: str, end: str) -> None:
 
 
 def load_prices(code: str, market: str, start: str, end: str) -> pd.DataFrame:
+    """Close-only, float32 — the web backend's computations use only the close;
+    loading a single float32 column instead of the full float64 OHLCV row set
+    cuts per-series memory ~95%. Loaded per code on demand and released when
+    the caller's frame goes away (nothing is cached module-wide)."""
     conn = _conn()
     if market == "custom":
         ds_id = int(code[len(CUSTOM_PREFIX):])
-        return db.load_custom_series(conn, ds_id, start, end)
-    info = security_info(code)
-    if info and info["category"] == "權證":
-        _ensure_on_demand(code, start, end)
-    return db.load_price_series(conn, code, market, start, end)
+        df = db.load_custom_series(conn, ds_id, start, end)
+    else:
+        info = security_info(code)
+        if info and info["category"] == "權證":
+            _ensure_on_demand(code, start, end)
+        df = db.load_price_series(conn, code, market, start, end, columns=("close",))
+    df["close"] = df["close"].astype("float32")
+    return df
 
 
 def load_benchmark(start: str, end: str) -> pd.Series:

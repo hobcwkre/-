@@ -21,15 +21,30 @@ from . import backtest as bt
 from . import monte_carlo as mc
 from . import tpex_data
 from . import warrant_pricing as wp
+from .memlog import log_mem
+
+# ---- memory-budget guards (Render free tier: 512 MB) ----
+MAX_BACKTEST_CODES = 20          # codes per request (processed sequentially)
+MAX_BACKTEST_SPAN_DAYS = 4000    # ~11 years of daily data per code
+MC_MAX_CELLS = 20_000_000        # n_sims × n_trades ceiling; above this n_sims is clamped
+MAX_JOBS_KEPT = 10               # completed MC results retained in memory
+
+import numpy as _np
+
 
 def _json_safe(o):
-    """Replace non-finite floats (NaN/inf) with None so responses stay valid JSON."""
+    """Convert numpy scalars to native types and replace non-finite floats
+    with None. Needed because np.float32 (unlike np.float64) is NOT a
+    subclass of Python float, so FastAPI's encoder rejects it outright."""
     if isinstance(o, dict):
         return {k: _json_safe(v) for k, v in o.items()}
     if isinstance(o, list):
         return [_json_safe(v) for v in o]
-    if isinstance(o, float) and not math.isfinite(o):
-        return None
+    if isinstance(o, _np.integer):
+        return int(o)
+    if isinstance(o, (_np.floating, float)):
+        f = float(o)
+        return f if math.isfinite(f) else None
     return o
 
 
@@ -196,8 +211,22 @@ class BacktestRequest(BaseModel):
 
 @app.post("/api/backtest")
 def run_backtest(req: BacktestRequest):
+    # -- request-size guard: keeps a single request's working set bounded
+    if len(req.codes) > MAX_BACKTEST_CODES:
+        raise HTTPException(400, f"一次最多回測 {MAX_BACKTEST_CODES} 檔標的（收到 {len(req.codes)} 檔）")
+    try:
+        from datetime import date as _d
+        span = (_d.fromisoformat(req.end) - _d.fromisoformat(req.start)).days
+    except ValueError:
+        raise HTTPException(400, "日期格式錯誤（需 YYYY-MM-DD）")
+    if span > MAX_BACKTEST_SPAN_DAYS:
+        raise HTTPException(400, f"回測區間過長（{span} 天 > 上限 {MAX_BACKTEST_SPAN_DAYS} 天）")
+
+    log_mem(f"backtest start codes={len(req.codes)} span={span}d")
     results = {}
     errors = {}
+    # codes are processed one at a time; each code's price frame is released
+    # (del) before the next is loaded, so peak memory is one series, not all
     for code in req.codes:
         info = tpex_data.security_info(code)
         if info is None:
@@ -215,10 +244,13 @@ def run_backtest(req: BacktestRequest):
         except ValueError as exc:
             errors[code] = str(exc)
             continue
+        finally:
+            del prices
         result["code"] = code
         result["name"] = info["name"]
         result["category"] = info["category"]
         results[code] = result
+    log_mem("backtest done")
     if not results:
         raise HTTPException(400, detail={"message": "所有標的回測失敗", "errors": errors})
     return _json_safe({"results": results, "errors": errors})
@@ -237,18 +269,27 @@ JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 
 
-def _run_job(job_id: str, req: MonteCarloRequest) -> None:
+def _run_job(job_id: str, req: MonteCarloRequest, n_sims: int, clamped: bool) -> None:
     def cb(p: float) -> None:
         with JOBS_LOCK:
             JOBS[job_id]["progress"] = p
 
     try:
         result = mc.run_monte_carlo(
-            req.trade_returns, n_sims=req.n_sims, mode=req.mode,
+            req.trade_returns, n_sims=n_sims, mode=req.mode,
             capital=req.capital, progress_cb=cb,
         )
+        result["clamped"] = clamped
+        result["requested_n_sims"] = req.n_sims
         with JOBS_LOCK:
             JOBS[job_id].update(status="done", progress=1.0, result=_json_safe(result))
+            # evict oldest finished jobs so results don't accumulate for the
+            # life of the process (each holds the 200 sampled paths)
+            while len(JOBS) > MAX_JOBS_KEPT:
+                oldest = next(iter(JOBS))
+                if oldest == job_id or JOBS[oldest].get("status") == "running":
+                    break
+                del JOBS[oldest]
     except Exception as exc:  # noqa: BLE001
         with JOBS_LOCK:
             JOBS[job_id].update(status="error", error=str(exc))
@@ -256,11 +297,18 @@ def _run_job(job_id: str, req: MonteCarloRequest) -> None:
 
 @app.post("/api/montecarlo")
 def start_monte_carlo(req: MonteCarloRequest):
+    # -- simulation-budget guard: n_sims × n_trades bounded; auto-clamp n_sims
+    n_trades = len(req.trade_returns)
+    n_sims = req.n_sims
+    clamped = False
+    if n_sims * n_trades > MC_MAX_CELLS:
+        n_sims = max(MC_MAX_CELLS // n_trades, 100)
+        clamped = True
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
         JOBS[job_id] = {"status": "running", "progress": 0.0}
-    threading.Thread(target=_run_job, args=(job_id, req), daemon=True).start()
-    return {"job_id": job_id}
+    threading.Thread(target=_run_job, args=(job_id, req, n_sims, clamped), daemon=True).start()
+    return {"job_id": job_id, "n_sims": n_sims, "clamped": clamped}
 
 
 @app.get("/api/montecarlo/{job_id}")

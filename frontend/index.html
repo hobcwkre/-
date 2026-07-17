@@ -584,10 +584,15 @@ function MCResultPage({bt, mcTarget, mcResults}){
   const r = mcTarget==="__pf__" ? null : bt.results[mcTarget];
   const pct = q => mc.percentiles.find(p=>p.pct===q);
   const med = pct(50).drawdown, p95 = pct(95).drawdown, p99 = pct(99).drawdown;
+  // histogram bins are computed server-side (raw per-sim arrays are no longer
+  // shipped to the browser — a 100k-sim response used to carry ~8MB of floats)
+  const hEdges = mc.dd_hist.edges, hCounts = mc.dd_hist.counts;
+  const hCenters = hCounts.map((_,i)=>(hEdges[i]+hEdges[i+1])/2*100);
+  const hWidth = (hEdges[1]-hEdges[0])*100;
   const histSpec = {
-    data:[{x:mc.drawdowns.map(d=>d*100), type:"histogram", nbinsx:40,
+    data:[{x:hCenters, y:hCounts, type:"bar", width:hWidth,
            marker:{color:"#93c5fd", line:{color:"#fff", width:1}}, name:"回撤"}],
-    layout:{title:{text:"最大回撤分布", font:{size:14}}, xaxis:{title:"最大回撤 (%)", ticksuffix:"%"},
+    layout:{title:{text:"最大回撤分布", font:{size:14}}, xaxis:{title:"最大回撤 (%)", ticksuffix:"%"}, bargap:0,
       shapes:[[med,"#1d4ed8","中位數"],[p95,"#d97706","95百分位"],[p99,"#dc2626","99百分位"]].map(([v,c])=>
         ({type:"line", x0:v*100, x1:v*100, y0:0, y1:1, yref:"paper", line:{color:c, width:2, dash:"dash"}})),
       annotations:[[med,"#1d4ed8","中位數"],[p95,"#d97706","P95"],[p99,"#dc2626","P99"]].map(([v,c,t],i)=>
@@ -604,7 +609,8 @@ function MCResultPage({bt, mcTarget, mcResults}){
   };
   const underestimated = mc.underestimated;
   return <div className="grid gap-4">
-    <div className="text-sm text-slate-500">模擬對象：<b className="text-slate-800">{mcTargetLabel(bt, mcTarget)}</b>　模式：{mc.mode==="reshuffle"?"Reshuffle":"Bootstrap"}・{fmtNum(mc.n_sims,0)} 次</div>
+    <div className="text-sm text-slate-500">模擬對象：<b className="text-slate-800">{mcTargetLabel(bt, mcTarget)}</b>　模式：{mc.mode==="reshuffle"?"Reshuffle":"Bootstrap"}・{fmtNum(mc.n_sims,0)} 次
+      {mc.clamped && <span className="text-amber-600">　（原要求 {fmtNum(mc.requested_n_sims,0)} 次，因記憶體保護上限自動降為 {fmtNum(mc.n_sims,0)} 次）</span>}</div>
     <div className={"rounded-xl border p-4 "+(underestimated?"bg-amber-50 border-amber-300":"bg-emerald-50 border-emerald-300")}>
       <div className="font-bold text-sm mb-1">{underestimated ? "⚠ 風險可能被低估" : "✓ 原始回測的回撤估計尚屬保守"}</div>
       <div className="text-sm">
@@ -635,7 +641,7 @@ function MCResultPage({bt, mcTarget, mcResults}){
               <td className="text-right text-emerald-700">{fmtPct(p.drawdown)}</td>
               <td className="text-right">{p.recover_trades==null?"未回本":fmtNum(p.recover_trades,0)+" 筆"}</td>
               {mc.mode==="bootstrap" && <td className="text-right">
-                {fmtPct(percentileOf(mc.totals, 100-p.pct), true)}</td>}
+                {fmtPct(p.total_return, true)}</td>}
             </tr>)}</tbody>
         </table>
       </div>
@@ -645,11 +651,6 @@ function MCResultPage({bt, mcTarget, mcResults}){
       </div>
     </Card>
   </div>;
-}
-function percentileOf(arr, q){
-  const a=[...arr].sort((x,y)=>x-y);
-  const idx=(a.length-1)*q/100, lo=Math.floor(idx), hi=Math.ceil(idx);
-  return a[lo]+(a[hi]-a[lo])*(idx-lo);
 }
 
 /* ---------- page 5: combined portfolio vs benchmark ---------- */

@@ -177,14 +177,23 @@ def search_companies(conn: sqlite3.Connection, market: str, keyword: str, limit:
     )
 
 
+_PRICE_COLUMNS = ("open", "high", "low", "close", "avg_price", "volume",
+                  "amount", "transactions", "change")
+
+
 def load_price_series(
     conn: sqlite3.Connection,
     code: str,
     market: str,
     start: str | None = None,
     end: str | None = None,
+    columns: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
-    query = "SELECT date, open, high, low, close, avg_price, volume, amount, transactions, change " \
+    """Daily rows for one security. Pass columns=("close",) to load only what
+    a computation needs instead of the full OHLCV row (10x narrower frame)."""
+    cols = columns or _PRICE_COLUMNS
+    assert all(c in _PRICE_COLUMNS for c in cols)
+    query = f"SELECT date, {', '.join(cols)} " \
             "FROM daily_quotes WHERE market=? AND code=?"
     params: list = [market, code]
     if start:
