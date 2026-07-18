@@ -187,10 +187,18 @@ function SetupPage({state, setState, onRun, running}){
     apiGet("/api/securities?"+q).then(d=>set({securities:d.securities, secCode:d.securities[0]?.code||""}));
   },[category, industry]);
 
+  const equalize = list => {
+    const w = +(100/Math.max(list.length,1)).toFixed(2);
+    return list.map(c=>({...c, weight: w}));
+  };
   const addChip = ()=>{
     const sec = securities.find(s=>s.code===secCode);
-    if(sec && !chips.some(c=>c.code===sec.code)) set({chips:[...chips, sec]});
+    if(sec && !chips.some(c=>c.code===sec.code)) set({chips: equalize([...chips, sec])});
   };
+  const setChipWeight = (code, w)=>{
+    set({chips: chips.map(c=> c.code===code ? {...c, weight: Math.max(0, Math.min(100, +w||0))} : c)});
+  };
+  const weightSum = chips.reduce((a,c)=>a+(c.weight||0), 0);
   const [codeInput, setCodeInput] = useState("");
   const [codeErr, setCodeErr] = useState("");
   const addByCode = async ()=>{
@@ -200,7 +208,7 @@ function SetupPage({state, setState, onRun, running}){
     if(chips.some(c=>c.code===q)){ setCodeInput(""); return; }
     try{
       const info = await apiGet("/api/security/"+encodeURIComponent(q));
-      set({chips:[...chips, info]});
+      set({chips: equalize([...chips, info])});
       setCodeInput("");
     }catch(e){
       let msg = String(e.message||e);
@@ -244,15 +252,26 @@ function SetupPage({state, setState, onRun, running}){
           className="bg-slate-700 hover:bg-slate-800 text-white rounded-lg px-4 py-2 text-sm font-bold">以代碼加入</button>
         {codeErr && <span className="text-sm text-red-600 pb-2">{codeErr}</span>}
       </div>
-      <div className="flex flex-wrap gap-2 mt-4">
+      <div className="flex flex-wrap gap-2 mt-4 items-center">
         {chips.length===0 && <span className="text-sm text-slate-400">尚未加入標的，可複選多檔。</span>}
         {chips.map(c=>
           <span key={c.code} className="inline-flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-full pl-3 pr-1 py-1 text-sm">
             <span className="font-medium">{c.code} {c.name}</span>
             <span className="text-xs text-slate-500">{c.category==="自訂資料" ? "自訂" : c.board+(c.category!=="上櫃" ? "・"+c.category : "")}</span>
+            <input type="number" value={c.weight ?? 0} min="0" max="100" step="5"
+              onChange={e=>setChipWeight(c.code, e.target.value)}
+              className="w-16 text-right text-sm border border-slate-300 rounded-md px-1.5 py-0.5 tabular bg-white"
+              title="此標的的資金配置 %"/>
+            <span className="text-xs text-slate-500 -ml-1">%</span>
             <button className="w-6 h-6 rounded-full hover:bg-slate-200 text-slate-500"
                     onClick={()=>set({chips:chips.filter(x=>x.code!==c.code)})}>✕</button>
           </span>)}
+        {chips.length>0 &&
+          <span className={"text-xs tabular "+(Math.abs(weightSum-100)>0.5?"text-amber-600":"text-slate-400")}>
+            配置合計 {weightSum.toFixed(1)}%{Math.abs(weightSum-100)>0.5?"（將自動按比例正規化為 100%）":""}
+            <button className="ml-2 underline text-slate-500 hover:text-blue-600"
+              onClick={()=>set({chips: equalize(chips)})}>平均分配</button>
+          </span>}
       </div>
     </Card>
     <UploadCard onUploaded={info=>{
@@ -522,34 +541,42 @@ function dailyReturnsOf(eq){
   const out=[]; for(let i=1;i<eq.length;i++){ const v=eq[i]/eq[i-1]-1; if(isFinite(v)) out.push(v); }
   return out;
 }
-function combinedDailyReturns(bt, capital){
-  // equal-weight combine of per-code strategy equity (same rule as page 5)
+function portfolioWeights(bt){
+  // normalized capital-allocation weights (falls back to equal split)
+  const results = Object.values(bt.results);
+  const allocs = results.map(r=> r.allocated_capital ?? 1);
+  const total = allocs.reduce((a,b)=>a+b,0);
+  return Object.fromEntries(results.map((r,i)=>[r.code, allocs[i]/total]));
+}
+function combinedDailyReturns(bt){
+  // allocation-weighted combine of per-code strategy equity (same rule as page 5)
   const results = Object.values(bt.results);
   const dateSet = new Set();
   results.forEach(r=>r.dates.forEach(d=>dateSet.add(d)));
   const allDates = [...dateSet].sort();
-  const growth = results.map(r=>{
-    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]/capital]));
-    let last=1; return allDates.map(d=>{ if(map.has(d)) last=map.get(d); return last; });
+  const values = results.map(r=>{
+    const start = r.allocated_capital ?? r.equity_curve[0];
+    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]]));
+    let last=start; return allDates.map(d=>{ if(map.has(d)) last=map.get(d); return last; });
   });
-  const pf = allDates.map((_,i)=> growth.reduce((a,g)=>a+g[i],0)/results.length);
+  const pf = allDates.map((_,i)=> values.reduce((a,v)=>a+v[i],0));
   return dailyReturnsOf(pf);
 }
 function portfolioTradeReturns(bt){
-  // merge every code's trades chronologically; each trade acts on a 1/N
-  // equal-weight slice, so its portfolio-level return is scaled by 1/N
-  const results = Object.values(bt.results);
-  const n = results.length;
+  // merge every code's trades chronologically; each trade acts on that
+  // code's capital slice, so its portfolio-level return is scaled by the
+  // code's allocation weight (was 1/N before per-code weights existed)
+  const w = portfolioWeights(bt);
   const all = [];
-  results.forEach(r=>r.trades.forEach(t=>
-    all.push({exit_date:t.exit_date, ret:t.return/n, code:r.code})));
+  Object.values(bt.results).forEach(r=>r.trades.forEach(t=>
+    all.push({exit_date:t.exit_date, ret:t.return*w[r.code], code:r.code})));
   all.sort((a,b)=> a.exit_date < b.exit_date ? -1 : 1);
   return all.map(t=>t.ret);
 }
 function mcTargetLabel(bt, target){
   if(target==="__pf__"){
     const n = Object.keys(bt.results).length;
-    return `投資組合（${n} 檔等權重合併）`;
+    return `投資組合（${n} 檔依配置權重合併）`;
   }
   const r = bt.results[target];
   return r ? `${r.code} ${r.name}` : target;
@@ -557,7 +584,7 @@ function mcTargetLabel(bt, target){
 function mcTradeReturns(bt, target){
   // 多均線分批沒有成對的進出場交易 — 以每日報酬序列作為模擬輸入
   if(isMaMulti(bt)){
-    if(target==="__pf__") return combinedDailyReturns(bt, 1000000);
+    if(target==="__pf__") return combinedDailyReturns(bt);
     const r = bt.results[target];
     return r ? dailyReturnsOf(r.equity_curve) : [];
   }
@@ -583,7 +610,7 @@ function MCSetupPage({bt, mcState, setMcState, onRun}){
             <button onClick={()=>setMcState(s=>({...s, target:"__pf__", job:null}))}
               className={"text-left border rounded-xl px-4 py-2.5 "+(target==="__pf__"?"border-blue-600 ring-2 ring-blue-100 bg-blue-50":"border-slate-300 bg-white hover:border-blue-300")}>
               <div className="text-sm font-bold">投資組合</div>
-              <div className="text-xs text-slate-500">{codes.length} 檔等權重，全部交易依時間合併</div>
+              <div className="text-xs text-slate-500">{codes.length} 檔依配置權重，全部交易依時間合併</div>
             </button>
             <button onClick={()=>setMcState(s=>({...s, target:codes[0], job:null}))}
               className={"text-left border rounded-xl px-4 py-2.5 "+(target!=="__pf__"?"border-blue-600 ring-2 ring-blue-100 bg-blue-50":"border-slate-300 bg-white hover:border-blue-300")}>
@@ -832,16 +859,20 @@ function PortfolioPage({bt, setup}){
   const results = Object.values(bt.results);
   const capital = setup.capital;
 
-  // ---- combine per-code strategy equity into one equal-weight portfolio
+  // ---- combine per-code strategy equity by each code's capital allocation
+  // (每檔按頁① 設定的 % 配置資金各自跑策略，組合＝各切片權益的加總)
   const dateSet = new Set();
   results.forEach(r=>r.dates.forEach(d=>dateSet.add(d)));
   const allDates = [...dateSet].sort();
-  const growth = results.map(r=>{
-    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]/capital]));
-    let last = 1; // before a code's first bar its slice sits in cash (growth 1)
+  const allocs = results.map(r=> r.allocated_capital ?? capital/results.length);
+  const totalAlloc = allocs.reduce((a,b)=>a+b,0);
+  const wNorm = allocs.map(a=>a/totalAlloc);
+  const values = results.map((r,idx)=>{
+    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]]));
+    let last = allocs[idx]; // before a code's first bar its slice sits in cash
     return allDates.map(d=>{ if(map.has(d)) last = map.get(d); return last; });
   });
-  const pf = allDates.map((_,i)=> capital * growth.reduce((a,g)=>a+g[i],0)/results.length);
+  const pf = allDates.map((_,i)=> values.reduce((a,v)=>a+v[i],0));
   const pfStats = seriesStats(pf, allDates);
 
   const [detail, setDetail] = useState(null);
@@ -854,7 +885,7 @@ function PortfolioPage({bt, setup}){
     const firstIdx = closes.findIndex(v=>v!=null);
     if(firstIdx>=0 && firstIdx < allDates.length-1){
       const base = closes[firstIdx];
-      benchEq = closes.map(v=> v==null ? null : capital*v/base);
+      benchEq = closes.map(v=> v==null ? null : pf[0]*v/base);  // 與組合同額起點
       const validEq = benchEq.filter(v=>v!=null);
       const validDates = allDates.filter((_,i)=>benchEq[i]!=null);
       benchStats = seriesStats(validEq, validDates);
@@ -894,8 +925,8 @@ function PortfolioPage({bt, setup}){
   const worst = ddEps[0];
   const p5d = {
     total:{title:"組合報酬率", formula:"組合期末權益 ÷ 起始資金 − 1",
-      steps:[["起始資金", fmtNum(capital)],["期末組合權益", fmtNum(pf[pf.length-1])],["結果", fmtPct(pfStats.total,true)]],
-      note:"整個等權重組合在回測區間的累積損益百分比。組合每日價值＝各標的策略權益的平均（各佔 1/N）。"},
+      steps:[["起始資金（各檔配置合計）", fmtNum(pf[0])],["期末組合權益", fmtNum(pf[pf.length-1])],["結果", fmtPct(pfStats.total,true)]],
+      note:"整個組合在回測區間的累積損益百分比。組合每日價值＝各標的策略切片權益的加總，各切片資金依頁① 設定的配置 % 分配。"},
     bench:{title:"大盤報酬率", formula:"櫃買指數期末值 ÷ 期初值 − 1（同區間）",
       steps:[["結果", benchStats?fmtPct(benchStats.total,true):"-"]],
       note:"同一段期間把同樣資金買進櫃買指數的報酬，是判斷策略有沒有價值的基準線。"},
@@ -960,7 +991,7 @@ function PortfolioPage({bt, setup}){
 
   const eqSpec = {
     data: [
-      {x:allDates, y:pf, type:"scatter", mode:"lines", name:"組合策略（等權重）",
+      {x:allDates, y:pf, type:"scatter", mode:"lines", name:"組合策略（依配置權重）",
        line:{color:"#2563eb", width:2.5}},
       ...(benchEq ? [{x:allDates, y:benchEq, type:"scatter", mode:"lines",
         name:"櫃買指數（同額投入）", line:{color:"#64748b", width:2, dash:"dash"}}] : []),
@@ -983,7 +1014,7 @@ function PortfolioPage({bt, setup}){
       <div className={"rounded-xl border p-4 text-sm "+(beats?"bg-red-50 border-red-200":"bg-emerald-50 border-emerald-200")}>
         <div className="font-bold mb-1">{beats ? "✓ 組合策略跑贏大盤" : "✗ 組合策略未跑贏大盤"}</div>
         <div>
-          將所選 <b>{results.length}</b> 檔標的等權重組成一個投資組合策略：期間報酬
+          將所選 <b>{results.length}</b> 檔標的依資金配置權重組成一個投資組合策略：期間報酬
           <b className="tabular"> {fmtPct(pfStats.total,true)}</b>，同期櫃買指數
           <b className="tabular"> {fmtPct(benchStats.total,true)}</b>，超額報酬
           <b className={"tabular "+retColor(excess)}> {fmtPct(excess,true)}</b>。
@@ -1086,21 +1117,24 @@ function PortfolioPage({bt, setup}){
       <div className="text-xs text-slate-400 mt-2">部位落水期間＝回撤起始日至虧損回復日；「尚未回復」表示至回測期末仍未回到前高。</div>
     </Card>
 
-    <Card title={`成分標的（等權重，各佔 ${fmtPct(1/results.length)}）`}>
+    <Card title="成分標的（依頁① 設定的資金配置）">
       <div className="overflow-x-auto">
         <table className="w-full text-sm tabular">
           <thead><tr className="text-xs text-slate-500 border-b border-slate-200">
             <th className="text-left py-2">標的</th><th className="text-left">類別</th>
+            <th className="text-right">配置權重</th><th className="text-right">配置資金</th>
             <th className="text-right">個別報酬率</th><th className="text-right">個別波動率</th>
             <th className="text-right">個別最大回撤</th><th className="text-right">對組合報酬貢獻</th>
             <th className="text-right">交易數</th></tr></thead>
           <tbody>{results.map((r,i)=>{
-            const contrib = r.metrics.total_return / results.length;
+            const contrib = r.metrics.total_return * wNorm[i];
             return <tr key={r.code} className="border-b border-slate-100">
               <td className="py-1.5 font-medium">
                 <span className="inline-block w-2.5 h-2.5 rounded-sm mr-2" style={{background:COMPARE_PALETTE[i%8]}}></span>
                 {r.code} {r.name}</td>
               <td className="text-slate-500">{r.category}</td>
+              <td className="text-right">{fmtPct(wNorm[i])}</td>
+              <td className="text-right">{fmtNum(allocs[i],0)}</td>
               <td className={"text-right "+retColor(r.metrics.total_return)}>{fmtPct(r.metrics.total_return,true)}</td>
               <td className="text-right">{fmtPct(r.metrics.volatility)}</td>
               <td className="text-right text-emerald-700">{fmtPct(r.metrics.max_drawdown)}</td>
@@ -1110,8 +1144,9 @@ function PortfolioPage({bt, setup}){
         </table>
       </div>
       <div className="text-xs text-slate-400 mt-2">
-        組合方式：起始本金平均分配給各標的，各自執行策略，期間不再平衡；
-        某標的尚無資料的日期，其資金視為現金。Beta／Alpha 以組合日報酬對櫃買指數日報酬迴歸估計。紅漲綠跌。
+        組合方式：起始本金依各檔設定的配置 % 分配（伺服器端自動正規化為 100%），各自執行策略，期間不再平衡；
+        某標的尚無資料的日期，其配置資金視為現金。對組合報酬貢獻＝配置權重×個別報酬率。
+        Beta／Alpha 以組合日報酬對櫃買指數日報酬迴歸估計。紅漲綠跌。
       </div>
     </Card>
     <DetailModal detail={detail} onClose={()=>setDetail(null)}/>
@@ -1291,7 +1326,8 @@ function App(){
     try{
       const body = {codes:setup.chips.map(c=>c.code), start:setup.start, end:setup.end,
         strategy:setup.strategy, params:setup.params, capital:setup.capital,
-        risk_pct:setup.riskPct, leverage:setup.leverage};
+        risk_pct:setup.riskPct, leverage:setup.leverage,
+        weights: Object.fromEntries(setup.chips.map(c=>[c.code, c.weight ?? 0]))};
       const data = await apiPost("/api/backtest", body);
       const codes = Object.keys(data.results);
       setBt(data); setActiveCode(codes[0]); setMcResults({});

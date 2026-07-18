@@ -224,11 +224,14 @@ class BacktestRequest(BaseModel):
     codes: list[str] = Field(min_length=1)
     start: str
     end: str
-    strategy: str  # "ma" | "rsi"
+    strategy: str  # "ma" | "rsi" | "ma_multi"
     params: dict = {}
     capital: float = 1_000_000
     risk_pct: float = 10.0
     leverage: float = 1.0
+    # per-code capital allocation in percent; missing codes share equally.
+    # Normalized to 100% server-side so the client never has to be exact.
+    weights: dict[str, float] | None = None
 
 
 @app.post("/api/backtest")
@@ -245,6 +248,15 @@ def run_backtest(req: BacktestRequest):
         raise HTTPException(400, f"回測區間過長（{span} 天 > 上限 {MAX_BACKTEST_SPAN_DAYS} 天）")
 
     log_mem(f"backtest start codes={len(req.codes)} span={span}d")
+
+    # ---- per-code capital allocation (weights normalized to sum to 100)
+    raw_w = req.weights or {}
+    weights = {c: max(float(raw_w.get(c, 0)), 0.0) for c in req.codes}
+    if sum(weights.values()) <= 0:
+        weights = {c: 1.0 for c in req.codes}  # default: equal split
+    w_sum = sum(weights.values())
+    weights = {c: w / w_sum for c, w in weights.items()}
+
     results = {}
     errors = {}
     # codes are processed one at a time; each code's price frame is released
@@ -258,10 +270,15 @@ def run_backtest(req: BacktestRequest):
         if prices.empty:
             errors[code] = "此區間無價格資料"
             continue
+        allocated = req.capital * weights[code]
+        if allocated <= 0:
+            errors[code] = "配置權重為 0，未執行回測"
+            del prices
+            continue
         try:
             result = bt.run_backtest(
                 prices, req.strategy, req.params,
-                capital=req.capital, risk_pct=req.risk_pct, leverage=req.leverage,
+                capital=allocated, risk_pct=req.risk_pct, leverage=req.leverage,
             )
         except ValueError as exc:
             errors[code] = str(exc)
@@ -271,6 +288,8 @@ def run_backtest(req: BacktestRequest):
         result["code"] = code
         result["name"] = info["name"]
         result["category"] = info["category"]
+        result["weight_pct"] = round(weights[code] * 100, 4)
+        result["allocated_capital"] = allocated
         results[code] = result
     log_mem("backtest done")
     if not results:
