@@ -7,6 +7,9 @@ from pathlib import Path
 import pandas as pd
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "tpex.sqlite3"
+# older history lives in a second file so no single file crosses GitHub's
+# 100MB hard limit; it holds close-only rows and is attached read-only-ish
+ARCHIVE_DB_PATH = DEFAULT_DB_PATH.with_name("tpex_archive.sqlite3")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -94,7 +97,23 @@ def get_conn(path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     # effectively sequential (one script rerun at a time), so this is safe.
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
+    if path == Path(DEFAULT_DB_PATH) and ARCHIVE_DB_PATH.exists():
+        conn.execute("ATTACH DATABASE ? AS arch", (str(ARCHIVE_DB_PATH),))
     return conn
+
+
+def _has_archive(conn: sqlite3.Connection) -> bool:
+    # sqlite3.Connection can't hold custom attributes — inspect the live state
+    return any(r[1] == "arch" for r in conn.execute("PRAGMA database_list"))
+
+
+def _quotes_table(conn: sqlite3.Connection) -> str:
+    """daily_quotes, transparently unioned with the archive when present.
+    SQLite flattens UNION ALL subqueries, so per-code WHERE clauses still
+    hit each file's primary-key index."""
+    if _has_archive(conn):
+        return "(SELECT * FROM daily_quotes UNION ALL SELECT * FROM arch.daily_quotes)"
+    return "daily_quotes"
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -194,7 +213,7 @@ def load_price_series(
     cols = columns or _PRICE_COLUMNS
     assert all(c in _PRICE_COLUMNS for c in cols)
     query = f"SELECT date, {', '.join(cols)} " \
-            "FROM daily_quotes WHERE market=? AND code=?"
+            f"FROM {_quotes_table(conn)} WHERE market=? AND code=?"
     params: list = [market, code]
     if start:
         query += " AND date >= ?"
@@ -209,9 +228,36 @@ def load_price_series(
 
 def covered_date_range(conn: sqlite3.Connection, market: str) -> tuple[str | None, str | None]:
     row = conn.execute(
-        "SELECT MIN(date), MAX(date) FROM daily_quotes WHERE market=?", (market,)
+        f"SELECT MIN(date), MAX(date) FROM {_quotes_table(conn)} WHERE market=?", (market,)
     ).fetchone()
     return (row[0], row[1]) if row else (None, None)
+
+
+def archive_old_quotes(conn: sqlite3.Connection, before: str) -> dict:
+    """Move daily_quotes rows older than `before` into the archive file,
+    keeping only close (the sole column any computation reads for history);
+    the other columns stay NULL and cost ~1 byte each."""
+    if _has_archive(conn):
+        conn.execute("DETACH DATABASE arch")
+    conn.execute("ATTACH DATABASE ? AS arch", (str(ARCHIVE_DB_PATH),))
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS arch.daily_quotes (
+             code TEXT NOT NULL, market TEXT NOT NULL, date TEXT NOT NULL,
+             open REAL, high REAL, low REAL, close REAL, avg_price REAL,
+             volume REAL, amount REAL, transactions REAL, change REAL,
+             PRIMARY KEY (code, market, date))"""
+    )
+    moved = conn.execute(
+        """INSERT OR REPLACE INTO arch.daily_quotes (code, market, date, close)
+           SELECT code, market, date, close FROM main.daily_quotes WHERE date < ?""",
+        (before,),
+    ).rowcount
+    conn.execute("DELETE FROM main.daily_quotes WHERE date < ?", (before,))
+    conn.commit()
+    conn.execute("DETACH DATABASE arch")
+    conn.execute("VACUUM")
+    conn.execute("ATTACH DATABASE ? AS arch", (str(ARCHIVE_DB_PATH),))
+    return {"moved": moved, "before": before}
 
 
 def upsert_warrant_terms(conn: sqlite3.Connection, df: pd.DataFrame) -> None:

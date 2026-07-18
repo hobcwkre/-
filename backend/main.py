@@ -54,6 +54,16 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def no_cache_html(request, call_next):
+    """Stale cached index.html + freshly deployed API = broken pages (the
+    front/back end ship together, so the HTML must revalidate every load)."""
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 # ---------------------------------------------------------------- lists
 
 @app.get("/api/categories")

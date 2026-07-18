@@ -95,7 +95,7 @@ function PlotBox({spec, height=340}){
   },[spec]);
   return <div ref={ref} style={{height}}/>;
 }
-function RegressionTable({reg}){
+function RegressionTable({reg, note}){
   if(!reg || !reg.rows) return <div className="text-sm text-slate-400">樣本不足，無法計算迴歸。</div>;
   return <div className="overflow-x-auto">
     <table className="w-full text-sm tabular">
@@ -115,7 +115,7 @@ function RegressionTable({reg}){
           <td className="text-right px-3">{r.ci_high.toFixed(4)}</td>
         </tr>)}</tbody>
     </table>
-    <div className="text-xs text-slate-400 mt-2">n = {reg.n}、R² = {reg.r2.toFixed(3)}。應變數：策略日報酬；自變數：標的收盤價日報酬。</div>
+    <div className="text-xs text-slate-400 mt-2">n = {reg.n}、R² = {reg.r2.toFixed(3)}。{note || "應變數：策略日報酬；自變數：標的收盤價日報酬。"}</div>
   </div>;
 }
 
@@ -265,14 +265,16 @@ function SetupPage({state, setState, onRun, running}){
         <Field label="策略類型">
           <select className={inputCls} value={strategy} onChange={e=>set({strategy:e.target.value})}>
             <option value="ma">均線交叉</option><option value="rsi">RSI</option>
+            <option value="ma_multi">多均線分批（20/60/120）</option>
           </select>
         </Field>
-        {strategy==="ma" ? <React.Fragment>
+        {strategy==="ma" && <React.Fragment>
           <Field label="短期均線"><input type="number" className={inputCls} value={params.short}
             onChange={e=>set({params:{...params, short:+e.target.value}})}/></Field>
           <Field label="長期均線"><input type="number" className={inputCls} value={params.long}
             onChange={e=>set({params:{...params, long:+e.target.value}})}/></Field>
-        </React.Fragment> : <React.Fragment>
+        </React.Fragment>}
+        {strategy==="rsi" && <React.Fragment>
           <Field label="RSI 週期"><input type="number" className={inputCls} value={params.period}
             onChange={e=>set({params:{...params, period:+e.target.value}})}/></Field>
           <Field label="買進/賣出門檻">
@@ -282,6 +284,19 @@ function SetupPage({state, setState, onRun, running}){
               <input type="number" className={inputCls+" w-full"} value={params.upper}
                 onChange={e=>set({params:{...params, upper:+e.target.value}})}/>
             </div>
+          </Field>
+        </React.Fragment>}
+        {strategy==="ma_multi" && <React.Fragment>
+          <Field label="三條均線（日）">
+            <div className="flex gap-2">
+              {["w1","w2","w3"].map(k=>
+                <input key={k} type="number" className={inputCls+" w-full"} value={params[k]}
+                  onChange={e=>set({params:{...params, [k]:+e.target.value}})}/>)}
+            </div>
+          </Field>
+          <Field label="進出場買賣 %數（每次交叉）">
+            <input type="number" className={inputCls} value={params.tranche} min="1" max="100" step="5"
+              onChange={e=>set({params:{...params, tranche:+e.target.value}})}/>
           </Field>
         </React.Fragment>}
       </div>
@@ -401,6 +416,19 @@ function ResultPage({bt, activeCode, setActiveCode}){
   const r = bt.results[activeCode] || bt.results[codes[0]];
   const m = r.metrics;
   const D = p2Details(r);
+  // 多均線分批：收盤價與各均線疊圖（對照簡報的 20/60/120MA 圖）
+  const rollMean = (arr,w)=>arr.map((_,i)=> i<w-1 ? null : arr.slice(i-w+1,i+1).reduce((a,b)=>a+b,0)/w);
+  const MA_COLORS = ["#0f766e","#3b82f6","#cbd5e1"];
+  const maSpec = r.ma_windows ? {
+    data:[
+      {x:r.dates, y:r.close, type:"scatter", mode:"lines", name:"收盤價",
+       line:{color:"#94a3b8", width:1.2}},
+      ...r.ma_windows.map((w,i)=>({x:r.dates, y:rollMean(r.close,w), type:"scatter", mode:"lines",
+        name:`${w} 日移動平均線 (${w}MA)`, line:{color:MA_COLORS[i%3], width:2}})),
+    ],
+    layout:{title:{text:"收盤價與多條移動平均線", font:{size:14}},
+      legend:{orientation:"h", y:-0.18}, margin:{b:70}}
+  } : null;
   const eqSpec = {
     data:[{x:r.dates, y:r.equity_curve, type:"scatter", mode:"lines", name:"權益",
            line:{color:"#2563eb", width:2}}],
@@ -433,6 +461,7 @@ function ResultPage({bt, activeCode, setActiveCode}){
       「⑤ 組合績效」頁的夏普採（年化報酬 − 無風險利率）為分子，Rf 可於該頁自訂。
       驗算素材可由下方「匯出每日權益 CSV」取得。
     </div>
+    {maSpec && <Card><PlotBox spec={maSpec} height={320}/></Card>}
     <Card><PlotBox spec={eqSpec}/></Card>
     <Card title="迴歸統計表（策略日報酬 ～ 標的收盤價日報酬）"><RegressionTable reg={r.regression}/></Card>
     <Card>
@@ -443,7 +472,9 @@ function ResultPage({bt, activeCode, setActiveCode}){
             onClick={()=>setShowTrades(!showTrades)}>{showTrades?"收合":"展開"}</button>
           <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
             onClick={()=>csvDownload(`trades_${r.code}.csv`,
-              r.trades.map(t=>({...t, return:(t.return*100).toFixed(3)+"%", pnl:t.pnl.toFixed(0)})),
+              r.trades.map(t=>({...t,
+                return: t.return==null? "" : (t.return*100).toFixed(3)+"%",
+                pnl: t.pnl==null? "" : t.pnl.toFixed(0)})),
               ["entry_date","exit_date","entry_price","exit_price","return","pnl","reason"])}>匯出交易明細 CSV</button>
           <button className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 hover:border-blue-400"
             onClick={()=>{
@@ -486,6 +517,24 @@ function ResultPage({bt, activeCode, setActiveCode}){
 }
 
 /* ---------- MC helpers: treat the selection as one portfolio ---------- */
+function isMaMulti(bt){ return Object.values(bt.results).some(r=>r.ma_windows); }
+function dailyReturnsOf(eq){
+  const out=[]; for(let i=1;i<eq.length;i++){ const v=eq[i]/eq[i-1]-1; if(isFinite(v)) out.push(v); }
+  return out;
+}
+function combinedDailyReturns(bt, capital){
+  // equal-weight combine of per-code strategy equity (same rule as page 5)
+  const results = Object.values(bt.results);
+  const dateSet = new Set();
+  results.forEach(r=>r.dates.forEach(d=>dateSet.add(d)));
+  const allDates = [...dateSet].sort();
+  const growth = results.map(r=>{
+    const map = new Map(r.dates.map((d,i)=>[d, r.equity_curve[i]/capital]));
+    let last=1; return allDates.map(d=>{ if(map.has(d)) last=map.get(d); return last; });
+  });
+  const pf = allDates.map((_,i)=> growth.reduce((a,g)=>a+g[i],0)/results.length);
+  return dailyReturnsOf(pf);
+}
 function portfolioTradeReturns(bt){
   // merge every code's trades chronologically; each trade acts on a 1/N
   // equal-weight slice, so its portfolio-level return is scaled by 1/N
@@ -506,10 +555,17 @@ function mcTargetLabel(bt, target){
   return r ? `${r.code} ${r.name}` : target;
 }
 function mcTradeReturns(bt, target){
+  // 多均線分批沒有成對的進出場交易 — 以每日報酬序列作為模擬輸入
+  if(isMaMulti(bt)){
+    if(target==="__pf__") return combinedDailyReturns(bt, 1000000);
+    const r = bt.results[target];
+    return r ? dailyReturnsOf(r.equity_curve) : [];
+  }
   if(target==="__pf__") return portfolioTradeReturns(bt);
   const r = bt.results[target];
   return r ? r.trades.map(t=>t.return) : [];
 }
+function mcUnitLabel(bt){ return isMaMulti(bt) ? "個每日報酬樣本" : "筆交易"; }
 
 /* ---------- page 3: MC settings ---------- */
 function MCSetupPage({bt, mcState, setMcState, onRun}){
@@ -520,7 +576,7 @@ function MCSetupPage({bt, mcState, setMcState, onRun}){
   const {mode, nSims, job} = mcState;
   const disabled = trades.length < 2;
   return <div className="grid gap-4 max-w-2xl">
-    <Card title={`蒙地卡羅模擬設定 — ${mcTargetLabel(bt, target)}（${trades.length} 筆交易）`}>
+    <Card title={`蒙地卡羅模擬設定 — ${mcTargetLabel(bt, target)}（${trades.length} ${mcUnitLabel(bt)}）`}>
       <div className="grid gap-4">
         <Field label="模擬對象">
           <div className="flex flex-wrap gap-3 items-center">
@@ -580,7 +636,8 @@ function MCSetupPage({bt, mcState, setMcState, onRun}){
 /* ---------- page 4: MC results ---------- */
 function MCResultPage({bt, mcTarget, mcResults}){
   const mc = mcResults[mcTarget];
-  if(!mc) return <Card><div className="text-slate-400 text-sm">尚未執行蒙地卡羅模擬。</div></Card>;
+  if(!mc) return <Card><div className="text-slate-400 text-sm">尚未執行蒙地卡羅模擬（或模擬對象已切換——請至「③」對目前對象執行模擬）。</div></Card>;
+  if(!mc.dd_hist) return <Card><div className="text-sm text-amber-700">模擬結果為舊版格式，請重新執行一次模擬（若在線上使用，請先按 Ctrl+F5 強制重新整理頁面）。</div></Card>;
   const r = mcTarget==="__pf__" ? null : bt.results[mcTarget];
   const pct = q => mc.percentiles.find(p=>p.pct===q);
   const med = pct(50).drawdown, p95 = pct(95).drawdown, p99 = pct(99).drawdown;
@@ -735,6 +792,33 @@ function olsAlphaBeta(rp, rm){
   const beta = sxy/sxx, alpha = yb - beta*xb;
   return {beta, alphaAnnual: alpha*252};
 }
+function erfApprox(x){
+  const s = Math.sign(x); x = Math.abs(x);
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+  const t = 1/(1+p*x);
+  return s*(1-((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x));
+}
+function olsFull(rp, rm, names){
+  // full OLS y = a + b·x with normal-approx p-values (matches the backend's)
+  const n = Math.min(rp.length, rm.length);
+  if(n<3) return null;
+  const x=rm.slice(0,n), y=rp.slice(0,n);
+  const xb=x.reduce((a,b)=>a+b,0)/n, yb=y.reduce((a,b)=>a+b,0)/n;
+  let sxx=0, sxy=0, sst=0;
+  for(let i=0;i<n;i++){ sxx+=(x[i]-xb)**2; sxy+=(x[i]-xb)*(y[i]-yb); sst+=(y[i]-yb)**2; }
+  if(sxx<=0) return null;
+  const beta=sxy/sxx, alpha=yb-beta*xb;
+  let rss=0; for(let i=0;i<n;i++){ const e=y[i]-(alpha+beta*x[i]); rss+=e*e; }
+  const sigma2=rss/(n-2);
+  const seB=Math.sqrt(sigma2/sxx), seA=Math.sqrt(sigma2*(1/n+xb*xb/sxx));
+  const row=(name,coef,se)=>{
+    const t=se>0? coef/se: NaN;
+    const p=isFinite(t)? 1-erfApprox(Math.abs(t)/Math.SQRT2): NaN;
+    return {name, coef, std_err:se, t, p, ci_low:coef-1.96*se, ci_high:coef+1.96*se};
+  };
+  return {n, r2: sst>0? 1-rss/sst: NaN,
+    rows:[row(names[0],alpha,seA), row(names[1],beta,seB)]};
+}
 
 function PortfolioPage({bt, setup}){
   const [bench, setBench] = useState(null);
@@ -760,8 +844,9 @@ function PortfolioPage({bt, setup}){
   const pf = allDates.map((_,i)=> capital * growth.reduce((a,g)=>a+g[i],0)/results.length);
   const pfStats = seriesStats(pf, allDates);
 
+  const [detail, setDetail] = useState(null);
   // ---- benchmark aligned to the same dates
-  let benchEq = null, benchStats = null, ab = null, benchAnnual = null;
+  let benchEq = null, benchStats = null, ab = null, benchAnnual = null, pfReg = null;
   if(bench && bench.dates.length>1){
     const bmap = new Map(bench.dates.map((d,i)=>[d, bench.closes[i]]));
     let last = null;
@@ -775,6 +860,7 @@ function PortfolioPage({bt, setup}){
       benchStats = seriesStats(validEq, validDates);
       ab = olsAlphaBeta(pfStats.rets, benchStats.rets);
       benchAnnual = annualReturns(validEq, validDates);
+      pfReg = olsFull(pfStats.rets, benchStats.rets, ["Const（α，日）", "Mkt（櫃買指數日報酬，β）"]);
     }
   }
   const excess = benchStats ? pfStats.total - benchStats.total : null;
@@ -803,6 +889,75 @@ function PortfolioPage({bt, setup}){
   const pfAnnual = annualReturns(pf, allDates);
   const ddEps = drawdownEpisodes(pf, allDates, 5);
 
+  // ---- clickable explanations (意義 + 公式 + 代入數字) for every metric
+  const FN = (x,d=4)=> (x==null||!isFinite(x))? "-" : Number(x).toFixed(d);
+  const worst = ddEps[0];
+  const p5d = {
+    total:{title:"組合報酬率", formula:"組合期末權益 ÷ 起始資金 − 1",
+      steps:[["起始資金", fmtNum(capital)],["期末組合權益", fmtNum(pf[pf.length-1])],["結果", fmtPct(pfStats.total,true)]],
+      note:"整個等權重組合在回測區間的累積損益百分比。組合每日價值＝各標的策略權益的平均（各佔 1/N）。"},
+    bench:{title:"大盤報酬率", formula:"櫃買指數期末值 ÷ 期初值 − 1（同區間）",
+      steps:[["結果", benchStats?fmtPct(benchStats.total,true):"-"]],
+      note:"同一段期間把同樣資金買進櫃買指數的報酬，是判斷策略有沒有價值的基準線。"},
+    excess:{title:"超額報酬", formula:"組合報酬率 − 大盤報酬率",
+      steps:[["組合", fmtPct(pfStats.total,true)],["大盤", benchStats?fmtPct(benchStats.total,true):"-"],["超額", excess!=null?fmtPct(excess,true):"-"]],
+      note:"正值代表策略贏過「什麼都不做、直接買大盤」；這是評斷主動策略最直接的一個數字。"},
+    cagr:{title:"年化報酬率 (CAGR)", formula:"(期末 ÷ 期初) ^ (1/年數) − 1",
+      steps:[["年數", FN((new Date(allDates[allDates.length-1])-new Date(allDates[0]))/864e5/365.25,3)],["結果", fmtPct(pfStats.cagr,true)]],
+      note:"把整段報酬換算成「平均每年複利多少」，方便跨期間比較；區間短時外推會誇大，需留意。"},
+    vol:{title:"組合波動率", formula:"日報酬標準差 × √252",
+      steps:[["日報酬樣本數", rets.length],["結果", fmtPct(pfStats.vol)]],
+      note:"衡量組合每天上下起伏的劇烈程度（年化）；數字越大，過程越顛簸，即使最終報酬相同。"},
+    bvol:{title:"大盤波動率", formula:"櫃買指數日報酬標準差 × √252",
+      steps:[["結果", benchStats?fmtPct(benchStats.vol):"-"]],
+      note:"與組合波動率對照：組合波動高於大盤，代表你承擔了比市場整體更大的震盪。"},
+    sharpe:{title:`夏普比率（Rf ${rf}%）`, formula:"(算術平均年化報酬 − 無風險利率) ÷ 年化波動率",
+      steps:[["算術平均年化", fmtPct(annArith,true)],["Rf", rf+"%"],["年化波動率", fmtPct(pfStats.vol)],["結果", FN(sharpeRf,2)]],
+      note:"每承擔一單位風險換到多少超額報酬；>1 算不錯、>2 相當好。可調上方 Rf 即時重算。"},
+    mdd:{title:"組合最大回撤", formula:"min(當日組合價值 ÷ 歷史高點 − 1)",
+      steps: worst? [["回撤起始（前高）", worst.start],["谷底", worst.trough],["深度", fmtPct(worst.depth)]] : [["結果", fmtPct(pfStats.mdd)]],
+      note:"從高點到谷底最深跌幅——實際持有時要能承受的最壞情境，是風險承受度的第一個檢查點。"},
+    arith:{title:"算術平均報酬（年化）", formula:"日報酬平均 × 252",
+      steps:[["日報酬平均", FN(annArith/252,6)],["結果", fmtPct(annArith,true)]],
+      note:"單純平均、不含複利；與幾何平均差距越大，代表波動的「拖累」越重。"},
+    geo:{title:"幾何平均報酬（年化）", formula:"(期末 ÷ 期初)^(1/年數) − 1",
+      steps:[["結果", fmtPct(pfStats.cagr,true)]],
+      note:"考慮複利的真實年化成長率——TEJ 手冊強調應以幾何平均衡量報酬（例：+100% 後 −50%，算術平均 +25%，幾何平均 0%）。"},
+    dvol:{title:"下跌標準差（年化）", formula:"√(平均(min(日報酬,0)²)) × √252",
+      steps:[["結果", fmtPct(downsideDev)]],
+      note:"只計下跌日的波動——投資人真正怕的是下跌；與總波動率一起看更精準（手冊的「下跌標準差」）。"},
+    skew:{title:"偏態", formula:"E[(r−μ)³] ÷ σ³",
+      steps:[["結果", FN(skew,3)]],
+      note:"<0 表示分布左尾長——存在偶發巨大虧損的風險；>0 則偶有大賺的機會（手冊判讀）。"},
+    kurt:{title:"峰態", formula:"E[(r−μ)⁴] ÷ σ⁴",
+      steps:[["結果", FN(kurt,2)]],
+      note:">3（常態）代表分布高狹、易受極端值影響，肥尾風險高；<3 較平緩（手冊判讀）。"},
+    corr:{title:"相關係數（對大盤）", formula:"Corr(組合日報酬, 大盤日報酬)",
+      steps:[["結果", FN(corr,3)]],
+      note:"介於 −1~1；越接近 1 代表組合幾乎跟著大盤走、分散效果差（手冊：數值越大分散效果越差）。"},
+    beta:{title:"Beta", formula:"Cov(組合, 大盤) ÷ Var(大盤)",
+      steps:[["結果", ab?FN(ab.beta,3):"-"]],
+      note:"系統性風險敏感度：>1 比大盤大漲大跌、<1 較溫和、≈0 與大盤脫鉤。詳細統計見下方迴歸表。"},
+    alpha:{title:"Alpha（年化）", formula:"(日α = 組合日報酬均 − β×大盤日報酬均) × 252",
+      steps:[["結果", ab?fmtPct(ab.alphaAnnual,true):"-"]],
+      note:"扣除市場風險後的超額報酬——手冊視為「是否勝過大盤」的核心指標；>0 才代表策略有真本事而非搭市場便車。"},
+    sortino:{title:"索提諾指標", formula:"(年化報酬 − Rf) ÷ 下跌標準差",
+      steps:[["結果", FN(sortino,2)]],
+      note:"夏普的變形：分母只算下跌波動，適合評估「上漲波動不該被懲罰」的策略（手冊公式）。"},
+    treynor:{title:"崔諾指標", formula:"(年化報酬 − Rf) ÷ Beta",
+      steps:[["結果", FN(treynor,2)]],
+      note:"每承擔一單位『系統性』風險的超額報酬；手冊提醒：低 Beta 組合會把此值放大，不適合單獨使用。"},
+    ir:{title:"信息指標", formula:"(組合−大盤)日報酬平均×252 ÷ 追蹤誤差(年化)",
+      steps:[["結果", FN(infoRatio,2)]],
+      note:"衡量相對大盤的超額報酬「穩不穩」；>0.5 已屬穩定優於大盤（手冊：衡量與大盤差異）。"},
+    win:{title:"勝率（日）", formula:"上漲日數 ÷ 總日數",
+      steps:[["結果", fmtPct(winRate)]],
+      note:"組合單日收正報酬的機率；需搭配期望值一起看——勝率低但賺大賠小仍可獲利。"},
+    expd:{title:"期望值（單日）", formula:"上漲機率×平均漲幅 ＋ 下跌機率×平均跌幅",
+      steps:[["結果", fmtPct(expectancyDaily,true)]],
+      note:">0 代表平均每天期望為正報酬（手冊的勝率＆期望值）；乘以 252 即年化算術平均。"},
+  };
+
   const eqSpec = {
     data: [
       {x:allDates, y:pf, type:"scatter", mode:"lines", name:"組合策略（等權重）",
@@ -813,7 +968,7 @@ function PortfolioPage({bt, setup}){
         name:`${r.code} ${r.name}`, line:{color:COMPARE_PALETTE[i%8], width:1}, opacity:0.45})),
     ],
     layout:{title:{text:"組合權益曲線 vs 大盤", font:{size:14}}, yaxis:{tickformat:",.0f"},
-      legend:{orientation:"h", y:1.18}}
+      legend:{orientation:"h", y:-0.18}, margin:{b:80}}
   };
   let peak=-Infinity;
   const dd = pf.map(v=>{ if(v>peak)peak=v; return v/peak-1; });
@@ -841,14 +996,14 @@ function PortfolioPage({bt, setup}){
       </div>}
 
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-      <Metric label="組合報酬率" value={fmtPct(pfStats.total,true)} cls={retColor(pfStats.total)}/>
-      <Metric label="大盤報酬率" value={benchStats?fmtPct(benchStats.total,true):"-"} cls={benchStats?retColor(benchStats.total):""}/>
-      <Metric label="超額報酬" value={excess!=null?fmtPct(excess,true):"-"} cls={excess!=null?retColor(excess):""}/>
-      <Metric label="年化報酬率" value={fmtPct(pfStats.cagr,true)} cls={retColor(pfStats.cagr)}/>
-      <Metric label="組合波動率" value={fmtPct(pfStats.vol)}/>
-      <Metric label="大盤波動率" value={benchStats?fmtPct(benchStats.vol):"-"}/>
-      <Metric label={`夏普比率（Rf ${rf}%）`} value={fmtNum(sharpeRf)}/>
-      <Metric label="組合最大回撤" value={fmtPct(pfStats.mdd)} cls="text-emerald-700"/>
+      <Metric label="組合報酬率" value={fmtPct(pfStats.total,true)} cls={retColor(pfStats.total)} onDetail={()=>setDetail(p5d.total)}/>
+      <Metric label="大盤報酬率" value={benchStats?fmtPct(benchStats.total,true):"-"} cls={benchStats?retColor(benchStats.total):""} onDetail={()=>setDetail(p5d.bench)}/>
+      <Metric label="超額報酬" value={excess!=null?fmtPct(excess,true):"-"} cls={excess!=null?retColor(excess):""} onDetail={()=>setDetail(p5d.excess)}/>
+      <Metric label="年化報酬率" value={fmtPct(pfStats.cagr,true)} cls={retColor(pfStats.cagr)} onDetail={()=>setDetail(p5d.cagr)}/>
+      <Metric label="組合波動率" value={fmtPct(pfStats.vol)} onDetail={()=>setDetail(p5d.vol)}/>
+      <Metric label="大盤波動率" value={benchStats?fmtPct(benchStats.vol):"-"} onDetail={()=>setDetail(p5d.bvol)}/>
+      <Metric label={`夏普比率（Rf ${rf}%）`} value={fmtNum(sharpeRf)} onDetail={()=>setDetail(p5d.sharpe)}/>
+      <Metric label="組合最大回撤" value={fmtPct(pfStats.mdd)} cls="text-emerald-700" onDetail={()=>setDetail(p5d.mdd)}/>
     </div>
 
     <Card>
@@ -863,32 +1018,37 @@ function PortfolioPage({bt, setup}){
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-x-6 gap-y-3 text-sm tabular">
         {[
-          ["算術平均報酬（年化）", fmtPct(annArith,true), retColor(annArith)],
-          ["幾何平均報酬（年化）", fmtPct(pfStats.cagr,true), retColor(pfStats.cagr)],
-          ["年化標準差", fmtPct(pfStats.vol), ""],
-          ["下跌標準差（年化）", fmtPct(downsideDev), ""],
-          ["偏態", fmtNum(skew,3), skew<0?"text-emerald-700":""],
-          ["峰態", fmtNum(kurt,2), kurt>3?"text-amber-600":""],
-          ["相關係數（對大盤）", fmtNum(corr,3), ""],
-          ["Beta", ab?fmtNum(ab.beta,3):"-", ""],
-          ["Alpha（年化）", ab?fmtPct(ab.alphaAnnual,true):"-", ab?retColor(ab.alphaAnnual):""],
-          ["夏普指標", fmtNum(sharpeRf), ""],
-          ["索提諾指標", fmtNum(sortino), ""],
-          ["崔諾指標", fmtNum(treynor), ""],
-          ["信息指標", fmtNum(infoRatio), ""],
-          ["勝率（日）", fmtPct(winRate), ""],
-          ["期望值（單日）", fmtPct(expectancyDaily,true), retColor(expectancyDaily)],
-        ].map(([k,v,c])=>
-          <div key={k} className="flex justify-between border-b border-slate-100 pb-1">
-            <span className="text-slate-500">{k}</span><b className={c}>{v}</b>
+          ["算術平均報酬（年化）", fmtPct(annArith,true), retColor(annArith), p5d.arith],
+          ["幾何平均報酬（年化）", fmtPct(pfStats.cagr,true), retColor(pfStats.cagr), p5d.geo],
+          ["年化標準差", fmtPct(pfStats.vol), "", p5d.vol],
+          ["下跌標準差（年化）", fmtPct(downsideDev), "", p5d.dvol],
+          ["偏態", fmtNum(skew,3), skew<0?"text-emerald-700":"", p5d.skew],
+          ["峰態", fmtNum(kurt,2), kurt>3?"text-amber-600":"", p5d.kurt],
+          ["相關係數（對大盤）", fmtNum(corr,3), "", p5d.corr],
+          ["Beta", ab?fmtNum(ab.beta,3):"-", "", p5d.beta],
+          ["Alpha（年化）", ab?fmtPct(ab.alphaAnnual,true):"-", ab?retColor(ab.alphaAnnual):"", p5d.alpha],
+          ["夏普指標", fmtNum(sharpeRf), "", p5d.sharpe],
+          ["索提諾指標", fmtNum(sortino), "", p5d.sortino],
+          ["崔諾指標", fmtNum(treynor), "", p5d.treynor],
+          ["信息指標", fmtNum(infoRatio), "", p5d.ir],
+          ["勝率（日）", fmtPct(winRate), "", p5d.win],
+          ["期望值（單日）", fmtPct(expectancyDaily,true), retColor(expectancyDaily), p5d.expd],
+        ].map(([k,v,c,d])=>
+          <div key={k} onClick={()=>setDetail(d)}
+            className="flex justify-between border-b border-slate-100 pb-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1"
+            title="點擊查看意義與計算">
+            <span className="text-slate-500">{k} <span className="text-slate-300 text-xs">ⓘ</span></span><b className={c}>{v}</b>
           </div>)}
       </div>
       <div className="text-xs text-slate-400 mt-3">
         夏普／索提諾／崔諾皆以（算術平均年化報酬 − 無風險利率）為分子，<b>目前採用 Rf = {rf}%</b>（可於右上調整，數值即時重算）；
-        偏態 &lt; 0 表示有巨大損失的潛在風險、峰態 &gt; 3 表示分佈高狹易受極端值影響；
-        信息指標衡量相對大盤的超額報酬穩定度；期望值＝上漲機率×平均漲幅＋下跌機率×平均跌幅。
+        每一列皆可點擊查看該指標的意義、公式與代入數字。
       </div>
     </Card>
+
+    {pfReg && <Card title="市場模型迴歸統計表（組合日報酬 ～ 櫃買指數日報酬）">
+      <RegressionTable reg={pfReg} note="應變數：組合日報酬；自變數：櫃買指數日報酬。β 即上表 Beta、截距年化即 Alpha；P 值以常態近似計算。"/>
+    </Card>}
 
     {pfAnnual.length>1 && <Card>
       <PlotBox spec={{
@@ -899,7 +1059,7 @@ function PortfolioPage({bt, setup}){
            name:"櫃買指數", marker:{color:"#94a3b8"}}] : []),
         ],
         layout:{title:{text:"各年度報酬", font:{size:14}}, barmode:"group",
-          xaxis:{type:"category"}, yaxis:{tickformat:",.0%"}, legend:{orientation:"h", y:1.15}}
+          xaxis:{type:"category"}, yaxis:{tickformat:",.0%"}, legend:{orientation:"h", y:-0.22}, margin:{b:70}}
       }} height={260}/>
     </Card>}
 
@@ -954,6 +1114,7 @@ function PortfolioPage({bt, setup}){
         某標的尚無資料的日期，其資金視為現金。Beta／Alpha 以組合日報酬對櫃買指數日報酬迴歸估計。紅漲綠跌。
       </div>
     </Card>
+    <DetailModal detail={detail} onClose={()=>setDetail(null)}/>
   </div>;
 }
 
@@ -1000,7 +1161,7 @@ function WarrantValuationPage(){
       {x:rows.map(r=>r.date), y:rows.map(r=>r.theoretical_price), type:"scatter", mode:"lines",
        name:"理論價（HV）", line:{color:"#d97706", width:2, dash:"dash"}},
     ],
-    layout:{title:{text:"市價 vs 理論價", font:{size:14}}, legend:{orientation:"h", y:1.15}}
+    layout:{title:{text:"市價 vs 理論價", font:{size:14}}, legend:{orientation:"h", y:-0.18}, margin:{b:70}}
   } : null;
   const mispSpec = rows.length ? {
     data:[{x:rows.map(r=>r.date), y:rows.map(r=>r.mispricing_pct*100), type:"scatter", mode:"lines",
@@ -1015,7 +1176,7 @@ function WarrantValuationPage(){
        y:data.rows.filter(r=>r.iv!=null).map(r=>r.iv*100), type:"scatter", mode:"lines",
        name:"隱含波動率 IV", line:{color:"#dc2626", width:2}},
     ],
-    layout:{title:{text:"隱含波動率 vs 標的歷史波動率", font:{size:14}}, yaxis:{ticksuffix:"%"}, legend:{orientation:"h", y:1.15}}
+    layout:{title:{text:"隱含波動率 vs 標的歷史波動率", font:{size:14}}, yaxis:{ticksuffix:"%"}, legend:{orientation:"h", y:-0.18}, margin:{b:70}}
   } : null;
 
   const last = rows.length ? rows[rows.length-1] : null;
@@ -1115,8 +1276,8 @@ function App(){
   const [page, setPage] = useState(0);
   const [setup, setSetup] = useState({
     categories:[], industries:[], securities:[], category:"", industry:"", secCode:"",
-    chips:[], start:"2025-07-01", end:"2026-07-09", strategy:"ma",
-    params:{short:5, long:20, period:14, lower:30, upper:70},
+    chips:[], start:"2022-01-03", end:new Date().toISOString().slice(0,10), strategy:"ma",
+    params:{short:5, long:20, period:14, lower:30, upper:70, w1:20, w2:60, w3:120, tranche:20},
     capital:1000000, riskPct:10, leverage:1, error:""
   });
   const [running, setRunning] = useState(false);

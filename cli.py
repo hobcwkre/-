@@ -56,6 +56,16 @@ def cmd_sync_quotes(args: argparse.Namespace) -> None:
     print(f"done: {result}")
 
 
+def cmd_archive_old(args: argparse.Namespace) -> None:
+    conn = db.get_conn()
+    db.init_db(conn)
+    result = db.archive_old_quotes(conn, args.before)
+    main_mb = db.DEFAULT_DB_PATH.stat().st_size / 1e6
+    arch_mb = db.ARCHIVE_DB_PATH.stat().st_size / 1e6
+    print(f"archived {result['moved']} rows before {result['before']}")
+    print(f"main: {main_mb:.1f} MB, archive: {arch_mb:.1f} MB")
+
+
 def cmd_sync_warrant_terms(args: argparse.Namespace) -> None:
     conn = db.get_conn()
     db.init_db(conn)
@@ -112,6 +122,10 @@ def main() -> None:
     p.add_argument("--end", type=_parse_date, default=None, help="YYYY-MM-DD (default: today)")
     p.add_argument("--delay", type=float, default=0.4)
     p.set_defaults(func=cmd_sync_index)
+
+    p = sub.add_parser("archive-old")
+    p.add_argument("--before", default="2025-01-01", help="move quotes older than this date to the archive file")
+    p.set_defaults(func=cmd_archive_old)
 
     p = sub.add_parser("sync-warrant-terms")
     p.add_argument("--delay", type=float, default=0.4)

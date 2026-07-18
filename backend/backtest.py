@@ -68,6 +68,122 @@ def build_signal(close: pd.Series, strategy: str, params: dict) -> tuple[pd.Seri
     raise ValueError(f"未知策略: {strategy}")
 
 
+# ---------------------------------------------------------------- fractional engine (多均線分批)
+
+def run_backtest_ma_multi(
+    price_df: pd.DataFrame,
+    params: dict,
+    capital: float = 1_000_000,
+    leverage: float = 1.0,
+) -> dict:
+    """多均線分批策略（對照 TEJ 簡報做法）：
+
+    - 期初以全額買入（部位比例 f = 1）。
+    - 三條均線（預設 20/60/120，可調）兩兩構成三組配對；任一組發生
+      死亡交叉（短均線跌破長均線）→ 賣出「原始投資金額」的 X%（部位 −X%）；
+      黃金交叉 → 買回 X%（部位 +X%）。部位比例夾在 [0, 1]。
+    - 訊號於次一交易日收盤執行；交叉僅在兩條均線皆有值時判定。
+    - 成本：加碼收手續費、減碼收手續費＋證交稅，按變動的名目金額計。
+
+    勝率／賺賠比對分批策略無明確定義（單筆進出不成對），回傳 NaN；
+    蒙地卡羅請以每日報酬序列為輸入（前端已配合）。
+    """
+    close = price_df["close"].dropna()
+    windows = sorted({int(params.get("w1", 20)), int(params.get("w2", 60)), int(params.get("w3", 120))})
+    if len(windows) < 2:
+        raise ValueError("至少需要兩條不同週期的均線")
+    tranche = float(params.get("tranche", 20)) / 100.0
+    if not (0 < tranche <= 1):
+        raise ValueError("進出場買賣%數需介於 0 與 100 之間")
+    if len(close) < max(windows) + 5:
+        raise ValueError(f"價格資料不足（最長均線 {max(windows)} 日需要至少 {max(windows)+5} 個交易日）")
+
+    mas = {w: close.rolling(w).mean() for w in windows}
+    pairs = [(a, b) for i, a in enumerate(windows) for b in windows[i+1:]]
+
+    n = len(close)
+    dates = close.index
+    # target position decided on bar t-1, executed at close of bar t
+    target = np.empty(n)
+    f = 1.0  # 期初全額買入
+    pending_delta = 0.0
+    deltas_at = np.zeros(n)
+    for i in range(n):
+        target[i] = f = min(1.0, max(0.0, f + pending_delta))
+        deltas_at[i] = pending_delta
+        pending_delta = 0.0
+        for a, b in pairs:
+            ma_a, ma_b = mas[a].iloc[i], mas[b].iloc[i]
+            if i == 0 or np.isnan(ma_a) or np.isnan(ma_b):
+                continue
+            pa, pb = mas[a].iloc[i-1], mas[b].iloc[i-1]
+            if np.isnan(pa) or np.isnan(pb):
+                continue
+            if pa >= pb and ma_a < ma_b:      # 死亡交叉 → 賣出一份
+                pending_delta -= tranche
+            elif pa <= pb and ma_a > ma_b:    # 黃金交叉 → 買回一份
+                pending_delta += tranche
+
+    equity = capital
+    equity_curve = np.empty(n)
+    trades: list[dict] = []
+    prev_f = 0.0
+    prev_price = close.iloc[0]
+    for i in range(n):
+        price = close.iloc[i]
+        ret = price / prev_price - 1 if i > 0 else 0.0
+        delta_f = target[i] - prev_f
+        cost = 0.0
+        if delta_f > 1e-12:
+            cost = leverage * delta_f * COMMISSION
+        elif delta_f < -1e-12:
+            cost = leverage * (-delta_f) * (COMMISSION + SELL_TAX)
+        equity = equity * (1 + leverage * prev_f * ret - cost)
+        if abs(delta_f) > 1e-12:
+            trades.append({
+                "entry_date": str(dates[i].date()), "exit_date": "",
+                "entry_price": round(float(price), 4), "exit_price": None,
+                "return": None, "pnl": None,
+                "reason": f"{'買進' if delta_f > 0 else '賣出'} {abs(delta_f)*100:.0f}%（部位 → {target[i]*100:.0f}%）",
+            })
+        equity_curve[i] = equity
+        prev_f = target[i]
+        prev_price = price
+
+    eq = pd.Series(equity_curve, index=dates)
+    daily_ret = eq.pct_change().dropna()
+    asset_ret = close.pct_change().dropna()
+    total_return = equity / capital - 1
+    days = (dates[-1] - dates[0]).days
+    years = days / 365.25 if days > 0 else float("nan")
+    cagr = (equity / capital) ** (1 / years) - 1 if years and years > 0 else float("nan")
+    vol = float(daily_ret.std(ddof=0) * np.sqrt(TRADING_DAYS))
+    sharpe = float(daily_ret.mean() * TRADING_DAYS / vol) if vol > 0 else float("nan")
+    running_max = eq.cummax()
+    max_dd = float((eq / running_max - 1).min())
+
+    aligned = pd.concat([daily_ret.rename("y"), asset_ret.rename("x")], axis=1).dropna()
+    regression = ols_summary(aligned["y"].to_numpy(), aligned["x"].to_numpy(), ("Const", "Adj close"))
+
+    label = f"多均線分批 ({'/'.join(str(w) for w in windows)}, 每次 {tranche*100:.0f}%)"
+    return {
+        "strategy_label": label,
+        "ma_windows": windows,
+        "dates": [str(d.date()) for d in dates],
+        "equity_curve": [round(float(v), 2) for v in equity_curve],
+        "positions": [round(float(v), 4) for v in target],
+        "close": [float(c) for c in close],
+        "trades": trades,
+        "metrics": {
+            "total_return": total_return, "cagr": cagr, "volatility": vol,
+            "sharpe": sharpe, "max_drawdown": max_dd,
+            "win_rate": float("nan"), "payoff_ratio": float("nan"),
+            "num_trades": len(trades),
+        },
+        "regression": regression,
+    }
+
+
 # ---------------------------------------------------------------- OLS
 
 def ols_summary(y: np.ndarray, x: np.ndarray, names: tuple[str, str]) -> dict:
@@ -111,6 +227,8 @@ def run_backtest(
     risk_pct: float = 10.0,
     leverage: float = 1.0,
 ) -> dict:
+    if strategy == "ma_multi":
+        return run_backtest_ma_multi(price_df, params, capital=capital, leverage=leverage)
     close = price_df["close"].dropna()
     if len(close) < 5:
         raise ValueError("價格資料不足（少於 5 個交易日）")
